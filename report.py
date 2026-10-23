@@ -2175,7 +2175,7 @@ function renderDash() {
                  y: {grid: {color: css("--grid")}, ticks: {color: css("--text-2"), precision: 0, callback: v => n(v)}}},
         elements: {line: {borderWidth: 2, tension: 0}, point: {radius: 4}}}}));
   }
-  line("db3", [["verkauft", "sold_value", "--s1"], ["Kontingent entzogen", "withdrawn_value", "--s6"]], v => eur(v));
+  line("db3", [["verkauft", "sold_value", "--s1"]], v => eur(v));
   line("db4", [["rauf", "up", "--up"], ["runter", "down", "--down"]], n);
 }
 
