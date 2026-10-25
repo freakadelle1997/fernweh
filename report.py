@@ -356,14 +356,18 @@ def _pricing(daten):
 LONG_NIGHTS = 30                    # längere Reisen (Weltreise-Etappen) nicht in die Wert-Summe
 BLOCK_ABS, BLOCK_MIN, BLOCK_SHARE = 50, 20, 0.25   # so viel auf einmal weg = Kontingent entzogen
 CAT_GONE_MIN = 5                    # ganze Kategorie ab so vielen Kabinen auf einmal weg = entzogen
+ASSIGN_DAYS = 30                    # in der Nacht auf diesen Tag vor Abfahrt teilt AIDA die Kabinen zu
 
 
 def _fleet_sales(daten, titles):
     """Verkäufe der 4-Monats-Reisen je Tag aus den Ereignissen in fleet/<id>.json (run.store).
     Beim Seitenbau berechnet, damit spätere Abrufe frühere Tage korrigieren: Eine verschwundene
     Kabine zählt nur als verkauft, wenn sie bis heute nicht wieder aufgetaucht ist („kurz weg“ sonst).
-    Verschwinden auf einmal sehr viele Kabinen einer Reise oder eine ganze Kategorie, hat AIDA ein
-    Kontingent herausgenommen („entzogen“) – das ist kein Verkauf. Reisen über LONG_NIGHTS Nächte
+    In der Nacht auf Tag ASSIGN_DAYS vor Abfahrt vergibt AIDA die Kabinen für die Buchungen ohne
+    Kabinenwahl (CLASSIC/LIGHT): Sie verschwinden auf einmal, sind aber über Wochen verkauft worden
+    („zugeteilt“, kein Tagesverkauf; Okt. 2026: nur Kabinenarten mit Zuteilungstarif betroffen).
+    Verschwinden sonst auf einmal sehr viele Kabinen einer Reise oder eine ganze Kategorie, hat AIDA
+    ein Kontingent herausgenommen („entzogen“) – das ist kein Verkauf. Reisen über LONG_NIGHTS Nächte
     werden getrennt geführt, sonst bestimmt eine Weltreise-Etappe den Tageswert."""
     fdir = daten / "fleet"
     cat = {}
@@ -382,12 +386,18 @@ def _fleet_sales(daten, titles):
         jid = h.get("journey") or f.stem
         meta[jid] = [None, h.get("ship"), h.get("start")]   # Ersatz, wenn die Reise nicht mehr im Katalog steht
         long_trip = ((cat.get(jid) or {}).get("nights") or 0) > LONG_NIGHTS
+        fetched = sorted(h.get("counts") or {})                 # Abruftage dieser Reise
+        start = date.fromisoformat(h["start"]) if h.get("start") else None
         later = set()                   # Kabinen, die nach dem jeweiligen Ereignis wieder frei wurden
         for ev in reversed(evs):
             day = (ev.get("ts") or "")[:10]
             drop = ev.get("f0", 0) - ev.get("f1", 0)
             block = drop >= BLOCK_ABS or (drop >= BLOCK_MIN and drop >= BLOCK_SHARE * ev.get("f0", 0))
+            prev = max((x for x in fetched if x < day), default=None)
+            assign = bool(start and prev and day) and \
+                (start - date.fromisoformat(prev)).days > ASSIGN_DAYS >= (start - date.fromisoformat(day)).days
             e = out.setdefault(day, {"sold": 0, "sold_value": 0.0, "unpriced": 0, "back": 0, "short": 0,
+                                     "assigned": 0, "assigned_value": 0.0,
                                      "withdrawn": 0, "withdrawn_value": 0.0, "long_sold": 0, "long_value": 0.0})
             t = trips.setdefault((day, jid), [0, 0, 0.0, 0])
             for code, nums in (ev.get("g") or {}).items():
@@ -398,7 +408,9 @@ def _fleet_sales(daten, titles):
                 e["short"] += n_short
                 if not n:
                     continue
-                if block or whole:
+                if assign:
+                    e["assigned"] += n; e["assigned_value"] += (v or 0) * n
+                elif block or whole:
                     e["withdrawn"] += n; e["withdrawn_value"] += (v or 0) * n
                 elif long_trip:
                     e["long_sold"] += n; e["long_value"] += (v or 0) * n
@@ -432,7 +444,7 @@ def _fleet_sales(daten, titles):
         e["top"] = [[k, v[0], v[1], round(v[2]), v[3]] + (titles.get(k) or meta.get(k) or [None, None, None])
                     for k, v in sorted(bt.items(), key=lambda kv: -kv[1][0])[:15]]
     for e in out.values():
-        for k in ("sold_value", "withdrawn_value", "long_value"):
+        for k in ("sold_value", "assigned_value", "withdrawn_value", "long_value"):
             e[k] = round(e[k])
     return out
 
@@ -2108,14 +2120,14 @@ function renderDash() {
   if (!D.length) { root.innerHTML = `<p class="mut">Noch keine Tageszahlen – entstehen mit dem täglichen 8-Uhr-Lauf.</p>`; return; }
   const last = D[D.length - 1], fl = [...D].reverse().find(x => x.sold != null);
   const n = v => v == null ? "–" : Math.round(v).toLocaleString("de-DE");
-  root.innerHTML = `<p class="kmeta">Verkäufe = Kabinen, die in den Reisen der nächsten 4 Monate verschwunden und bis heute nicht wieder frei geworden sind (nur Kategorien unter 100 freien Kabinen; Wert = PREMIUM-Listenpreis der Unterkategorie für 2 Personen). Nicht mitgezählt: Kabinen, die später wieder auftauchen („kurz weg“), und Kontingente, die AIDA herausnimmt („entzogen“: ab 50 Kabinen einer Reise auf einmal, ab 20 und einem Viertel der freien, oder eine ganze Kategorie ab 5 Kabinen). Reisen über 30 Nächte stehen getrennt. Frühere Tage können sich noch ändern, wenn Kabinen zurückkommen.</p>
+  root.innerHTML = `<p class="kmeta">Verkäufe = Kabinen, die in den Reisen der nächsten 4 Monate verschwunden und bis heute nicht wieder frei geworden sind (nur Kategorien unter 100 freien Kabinen; Wert = PREMIUM-Listenpreis der Unterkategorie für 2 Personen). Nicht mitgezählt: Kabinen, die später wieder auftauchen („kurz weg“), und Kontingente, die AIDA herausnimmt („entzogen“: ab 50 Kabinen einer Reise auf einmal, ab 20 und einem Viertel der freien, oder eine ganze Kategorie ab 5 Kabinen). Getrennt geführt: In der Nacht auf den 30. Tag vor Abfahrt vergibt AIDA die Kabinen für Buchungen ohne Kabinenwahl (CLASSIC/LIGHT) – diese Kabinen verschwinden auf einmal („zugeteilt“). Das sind Verkäufe aus den Wochen davor, nicht vom selben Tag. Reisen über 30 Nächte stehen getrennt. Frühere Tage können sich noch ändern, wenn Kabinen zurückkommen.</p>
     <div class="tiles">
       <div class="tile"><div class="k">Reisen im Katalog</div><div class="v">${n(last.total)}</div><div class="d">Stand ${d(last.day)}</div></div>
       <div class="tile"><div class="k">Neu / entfallen</div><div class="v">${last.new != null ? "+" + last.new + " / −" + last.gone : "–"}</div><div class="d">gegenüber Vortag</div></div>
       <div class="tile"><div class="k">Kabinen verkauft</div><div class="v">${fl ? n(fl.sold) : "–"}</div><div class="d">${fl ? `${n(fl.back)} wieder frei · ${d(fl.day)}` : "ab dem nächsten Tageslauf"}</div></div>
       <div class="tile"><div class="k">Wert verkauft</div><div class="v">${fl ? eur(fl.sold_value) : "–"}</div><div class="d">${fl && fl.sold ? "Ø " + eur(fl.sold_value / fl.sold) + " je Kabine" : ""}</div></div>
     </div>
-    ${fl && (fl.withdrawn || fl.short || fl.long_sold) ? `<p class="note" style="margin:0 0 14px">Am ${d(fl.day)} nicht als Verkauf gezählt: ${[fl.withdrawn ? `${n(fl.withdrawn)} Kabinen entzogen (${eur(fl.withdrawn_value)})` : "", fl.short ? `${n(fl.short)} nur kurz weg` : "", fl.long_sold ? `${n(fl.long_sold)} Kabinen auf Reisen über 30 Nächte (${eur(fl.long_value)})` : ""].filter(Boolean).join(" · ")}.</p>` : ""}
+    ${fl && (fl.assigned || fl.withdrawn || fl.short || fl.long_sold) ? `<p class="note" style="margin:0 0 14px">Am ${d(fl.day)} nicht als Tagesverkauf gezählt: ${[fl.assigned ? `${n(fl.assigned)} Kabinen zugeteilt (CLASSIC/LIGHT, früher gebucht, ${eur(fl.assigned_value)})` : "", fl.withdrawn ? `${n(fl.withdrawn)} Kabinen entzogen (${eur(fl.withdrawn_value)})` : "", fl.short ? `${n(fl.short)} nur kurz weg` : "", fl.long_sold ? `${n(fl.long_sold)} Kabinen auf Reisen über 30 Nächte (${eur(fl.long_value)})` : ""].filter(Boolean).join(" · ")}.</p>` : ""}
     <div class="charts">
       <div class="chart"><h3>Katalog: Reisen im Katalog je Tag</h3><div class="box"><canvas id="db1"></canvas></div></div>
       <div class="chart"><h3>Buchbare Kabinen je Tag (Reisen der nächsten 4 Monate)</h3><div class="box"><canvas id="db2"></canvas></div></div>
