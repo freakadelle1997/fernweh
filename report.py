@@ -397,7 +397,7 @@ def _booking(daten):
     fb_step = {"FB+": [], "FB": []}
     reg = {}                                # Fahrgebiet -> [Kabinenart-Tage, Summe Änderung]
     series = {}                             # (reise, kabinenart) -> [(tag, preis)]
-    ups = {}                                # reise -> Tage mit Erhöhung
+    ups, ups_t = {}, {}                     # reise (bzw. reise + kabinenart) -> Tage mit Erhöhung
     for a, b in zip(days, days[1:]):
         db = date.fromisoformat(b)
         for j, vb in H[b].items():
@@ -425,6 +425,7 @@ def _booking(daten):
                     steps.append(100 * (p - o) / o)
                     if p > o:
                         ups.setdefault(j, []).append(b)
+                        ups_t.setdefault((j, typ), []).append(b)
             if ended and steps:
                 fb_step[la].append(st.median(steps))
     for b in days:
@@ -498,7 +499,7 @@ def _booking(daten):
         "regions": sorted([{"label": r, "exp30": round(100 * 30 * v[1] / v[0], 2), "n": v[0]}
                            for r, v in reg.items() if v[0] >= 1000 and r != "?"], key=lambda x: -x["exp30"]),
         # nur für _bz_advice, wird nicht ausgeliefert
-        "_ups": ups, "_level": {j: lvl(v) for j, v in H[end].items()}, "_start": start, "_end": end,
+        "_ups": ups, "_ups_t": ups_t, "_types": {j: set(v.get("t") or {}) for j, v in H[end].items()}, "_level": {j: lvl(v) for j, v in H[end].items()}, "_start": start, "_end": end,
     }
 
 
@@ -530,12 +531,18 @@ def _bz_advice(B, j, focus=None, cats=None):
     # Schwung
     g = _bz_idx(n, BZ_COARSE)
     m = B["mom"][g]
-    recent = [x for x in B["_ups"].get(j, []) if (end - date.fromisoformat(x)).days < B["mom_days"]]
+    typ = focus[0][0] if focus and focus[0] else None
+    if typ not in B["_types"].get(j, ()):
+        typ = None
+    ups = B["_ups_t"].get((j, typ), []) if typ else B["_ups"].get(j, [])
+    recent = [x for x in ups if (end - date.fromisoformat(x)).days < B["mom_days"]]
+    hot = 0
     if recent and m["with"] is not None:
-        r.append(f"In den letzten {B['mom_days']} Tagen {len(recent)}× teurer geworden. Solche Reisen wurden in den "
-                 f"folgenden {B['mom_days']} Tagen zu {m['with']} % erneut teurer (sonst {m['without']} %).")
+        wer = f"Deine Kabinenart ({dict(GROUPS).get(_group(typ), typ)}) ist" if typ else "Die Reise ist"
+        r.append(f"{wer} in den letzten {B['mom_days']} Tagen {len(recent)}× teurer geworden. Danach wurde es bisher bei "
+                 f"{m['with']:.0f} von 100 Reisen bald nochmal teurer (sonst bei {m['without']:.0f}).")
         if m["with"] >= 30:
-            v = 2
+            v, hot = 2, hot + 1
     # Kürzliche Erhöhung, die AIDA vielleicht zurücknimmt
     if recent and B["reversed"]:
         last = max(recent)
@@ -556,7 +563,7 @@ def _bz_advice(B, j, focus=None, cats=None):
     if focus and focus[1] is not None and 0 < focus[1] <= 5 and sc.get("1–5"):
         r.append(f"Wunschkategorie {focus[0]}: nur noch {focus[1]} frei. Kategorien mit 1–5 freien Kabinen verschwinden "
                  f"zu {sc['1–5']:.0f} % innerhalb eines Monats.")
-        v = 2
+        v, hot = 2, hot + 1
     elif focus and focus[1] == 0:
         r.append(f"Wunschkategorie {focus[0]} ist derzeit ausgebucht.")
     elif cats:
@@ -564,7 +571,15 @@ def _bz_advice(B, j, focus=None, cats=None):
         if few and sc.get("1–5"):
             r.append(f"Nur noch 1–5 frei in {', '.join(few)} – solche Kategorien verschwinden zu {sc['1–5']:.0f} % "
                      f"innerhalb eines Monats.")
-    return {"v": v, "e": e, "r": r}
+    # Lage auf dem Farbstrahl (0 = kein Zeitdruck … 100 = bald buchen), je Etikett ein Drittel
+    cl = lambda x: max(0.0, min(1.0, x))
+    if v == 0:
+        s = 33 * cl(e / 0.3)
+    elif v == 1:
+        s = 34 + 32 * cl((e - 0.3) / 0.7)
+    else:
+        s = min(100, 70 + 20 * cl(e - 1) + 10 * hot)
+    return {"v": v, "e": e, "r": r, "s": round(s), "typ": typ and dict(GROUPS).get(_group(typ), typ)}
 
 
 LONG_NIGHTS = 30                   # längere Reisen (Weltreise-Etappen) nicht in die Wert-Summe
@@ -1207,6 +1222,18 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .card .focusbadge { display: inline-block; background: color-mix(in srgb, var(--s1) 12%, transparent);
   color: var(--s1); border-radius: 6px; padding: 2px 8px; font-size: 12.5px; font-weight: 600; margin-bottom: 12px; }
 .card .arrow { color: var(--muted); font-size: 13px; margin-top: 12px; }
+.card .cbz { padding: 8px 0 0; border-top: 1px solid var(--border); }
+.card .cbz .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; }
+.card .cbz .h .k { color: var(--text-2); }
+.bzs { position: relative; height: 8px; border-radius: 4px; margin: 8px 0 6px;
+  background: linear-gradient(90deg, var(--down), var(--s4) 50%, var(--up)); }
+.bzs i { position: absolute; top: 50%; left: calc(7px + (100% - 14px) * var(--p) / 100); width: 14px; height: 14px;
+  box-sizing: border-box; border-radius: 50%; background: var(--surface); border: 3px solid var(--text); transform: translate(-50%, -50%); }
+.bze { font-size: 12.5px; color: var(--muted); }
+.bzl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; font-size: 13px; }
+.bzl p { margin: 2px 0 0; color: var(--text-2); }
+.bzl > div:nth-child(2) { text-align: center; } .bzl > div:nth-child(3) { text-align: right; }
+@media (max-width: 760px) { .bzl { grid-template-columns: 1fr; gap: 8px; } .bzl > div { text-align: left !important; } }
 .back { background: none; border: none; color: var(--s1); font: inherit; cursor: pointer;
   padding: 0; margin-bottom: 14px; display: inline-flex; align-items: center; gap: 4px; }
 .back:hover { text-decoration: underline; }
@@ -1466,6 +1493,9 @@ const GROUPS = DATA.groups;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const eur = v => v == null ? "–" : v.toLocaleString("de-DE", {maximumFractionDigits: 0}) + " €";
 const d = s => s.split("-").reverse().join(".");
+const BZ_LABEL = ["Kein Zeitdruck", "Steigt leicht", "Bald buchen"];
+const bzStrip = bz => `<div class="bzs" title="${BZ_LABEL[bz.v]}"><i style="--p:${bz.s ?? [15, 50, 85][bz.v]}"></i></div>`;
+const bzEur = (bz, price) => price && bz.e ? `erwartet ${bz.e > 0 ? "+" : "−"}${eur(Math.abs(Math.round(price * bz.e / 100)))}` : "";
 const sign = (v, unit = "", invert = false) => {
   if (v == null) return '<span class="mut">–</span>';
   if (v === 0) return '<span class="mut">±0' + unit + '</span>';
@@ -1823,6 +1853,9 @@ function tripCard(t, ti) {
          <div class="cstat"><span class="k">Belegt</span><span class="v">unbekannt</span></div>`
       : `<div class="cstat"><span class="k">Frei gesamt</span><span class="v">${t.free_total.toLocaleString("de-DE")} / ${t.ship_total.toLocaleString("de-DE")}</span></div>
          <div class="cstat"><span class="k">Belegt</span><span class="v">${occ.toFixed(0)} %</span></div>`}
+    ${t.bz ? `<div class="cbz"><div class="h"><span class="k">Buchungszeitpunkt${t.bz.typ ? " · " + t.bz.typ : ""}</span>
+      <span class="bzv v${t.bz.v}">${BZ_LABEL[t.bz.v]}</span></div>${bzStrip(t.bz)}
+      ${t.focus && now.focus_allin && bzEur(t.bz, now.focus_allin) ? `<div class="bze">${bzEur(t.bz, now.focus_allin)} für deine Kabine im nächsten Monat</div>` : ""}</div>` : ""}
     ${t.error ? '<div class="arrow" style="color:var(--up)">⚠ letzter Abruf fehlgeschlagen</div>' : ""}
     <div class="arrow">Details ansehen →</div>
   </button>`;
@@ -2329,13 +2362,12 @@ function restoreScroll() {
 }
 
 // ---------- Bester Buchungszeitpunkt ----------
-const BZ_LABEL = ["Kein Zeitdruck", "Steigt leicht", "Bald buchen"];
 const pz = (v, dig = 1) => v == null ? "–" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(dig).replace(".", ",") + " %";
 function bzBox(bz, pp) {
   if (!bz || !DATA.booking) return "";
-  const em = pp && bz.e ? ` · erwartet ${bz.e > 0 ? "+" : "−"}${eur(Math.abs(Math.round(pp * bz.e / 100)))} p. P. im nächsten Monat` : "";
-  return `<div class="bz"><div class="sect" style="margin:0 0 4px">Buchungszeitpunkt</div>
-    <span class="bzv v${bz.v}">${BZ_LABEL[bz.v]}</span><span class="mut">${em}</span>
+  const em = bzEur(bz, pp) ? ` · ${bzEur(bz, pp)} p. P. im nächsten Monat` : "";
+  return `<div class="bz"><div class="sect" style="margin:0 0 4px">Buchungszeitpunkt${bz.typ ? ` <span class="mut" style="font-weight:400">· deine Kabinenart ${bz.typ}</span>` : ""}</div>
+    <span class="bzv v${bz.v}">${BZ_LABEL[bz.v]}</span><span class="mut">${em}</span>${bzStrip(bz)}
     <ul>${bz.r.map(x => `<li>${x}</li>`).join("")}</ul>
     <p class="note" style="margin:6px 0 0">Erfahrungswerte aus ${DATA.booking.n_days} Tagen Katalogdaten aller AIDA-Reisen, täglich neu berechnet – keine Garantie.</p></div>`;
 }
@@ -2372,11 +2404,14 @@ function renderBooking() {
           ${sc ? rule("Nur noch wenige Kabinen frei? Zugreifen", `Sind in einer Kategorie nur noch 1–5 Kabinen frei, ist sie bei ${Math.round(sc.gone30)} von 100 Reisen innerhalb eines Monats weg.`) : ""}
         </div></div>
     </div>
-    <div class="bz" style="max-width:none"><b>Die Etiketten bei den Reisen</b> (Meine Reisen und Katalog)
-      <ul><li><span class="bzv v2">Bald buchen</span>: Der Preis steigt wahrscheinlich bald – weil die Reise gerade teurer geworden ist, sie in einer teuren Phase steckt (über 1 % pro Monat) oder die Wunschkategorie fast ausgebucht ist.</li>
-        <li><span class="bzv v1">Steigt leicht</span>: Der Preis steigt voraussichtlich, aber langsam (0,3–1 % pro Monat).</li>
-        <li><span class="bzv v0">Kein Zeitdruck</span>: Der Preis bleibt voraussichtlich etwa gleich. Warten kostet wenig, bringt aber meist auch nichts.</li></ul>
-      Warum eine Reise welches Etikett hat, steht in der Reise selbst unter „Buchungszeitpunkt“.</div>
+    <div class="bz" style="max-width:none"><b>So liest du den Farbstrahl bei den Reisen</b>
+      <div class="bzs" style="margin:12px 0 10px"></div>
+      <div class="bzl">
+        <div><span class="bzv v0">Kein Zeitdruck</span><p>Der Preis bleibt voraussichtlich etwa gleich. Warten kostet wenig, bringt aber meist auch nichts.</p></div>
+        <div><span class="bzv v1">Steigt leicht</span><p>Der Preis steigt voraussichtlich, aber langsam (0,3–1 % pro Monat).</p></div>
+        <div><span class="bzv v2">Bald buchen</span><p>Der Preis steigt wahrscheinlich bald: Die Kabinenart ist gerade teurer geworden, die Reise steckt in einer teuren Phase (über 1 % pro Monat) oder die Wunschkategorie ist fast ausgebucht.</p></div>
+      </div>
+      <p class="note" style="margin:10px 0 0">Der Punkt zeigt, wo eine Reise steht – je weiter rechts, desto eiliger. Bei „Meine Reisen“ zählt deine gewählte Kabinenkategorie. Die Gründe stehen in der Reise unter „Buchungszeitpunkt“.</p></div>
     <details style="margin-top:14px"><summary style="cursor:pointer;color:var(--text-2)">Alle Zahlen und wie sie entstehen</summary>
       <p class="note" style="margin:10px 0">Grundlage: ${B.n_days} Tage Katalogdaten (${d(B.days[0])} – ${d(B.days[1])}). Verglichen wird jeden Tag der PREMIUM-Preis jeder Reise und Kabinenart mit dem Vortag. Die Auswertung rechnet bei jedem Lauf neu und wird mit jedem Tag genauer. Sie zeigt, was bisher typisch war – keine Garantie für eine einzelne Reise.</p>
       <div class="charts">
