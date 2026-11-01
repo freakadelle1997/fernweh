@@ -1062,9 +1062,9 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .krow .more { margin-top: 10px; }
 .krow .kbody { display: flex; gap: 14px; align-items: flex-start; cursor: pointer; }
 .krow .kmain { flex: 1; min-width: 0; }
-.kmap { flex: 0 0 120px; width: 120px; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px;
+.kmap { flex: 0 0 138px; width: 138px; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px;
   background: #eef2f7; }
-@media (max-width: 760px) { .kmap { flex-basis: 84px; width: 84px; } }
+@media (max-width: 760px) { .kmap { flex-basis: 97px; width: 97px; } }
 .mark { border: 1px solid var(--s1); color: var(--s1); background: none; border-radius: 8px; padding: 5px 10px;
   font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .mark.on { background: var(--s1); color: #fff; cursor: default; }
@@ -1907,7 +1907,7 @@ function drawKList() {
     const on = tracked.has(t.id), pend = KMARKED.has(t.id), kp = kPrice(t);
     return `<div class="krow" id="kr_${t.id}">
       <div class="kbody" onclick="toggleK('${t.id}')">
-      ${t.map ? `<img class="kmap" src="${routeImg(t.map, 240)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="kmap"></div>`}
+      ${t.map ? `<img class="kmap" src="${routeImg(t.map, 280)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="kmap"></div>`}
       <div class="kmain"><div class="top">
         <h3>${t.title}</h3>
         <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}</span>
