@@ -1058,6 +1058,7 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .krow .top h3 { margin: 0; font-size: 15.5px; flex: 1 1 260px; }
 .krow .m { color: var(--text-2); font-size: 13px; }
 .krow .p { font-weight: 700; font-variant-numeric: tabular-nums; }
+.krow .pf { display: block; color: var(--text-2); font-size: 12px; font-weight: 400; }
 .krow .more { margin-top: 10px; }
 .krow .kbody { display: flex; gap: 14px; align-items: flex-start; cursor: pointer; }
 .krow .kmain { flex: 1; min-width: 0; }
@@ -1842,7 +1843,14 @@ try { Object.assign(KF, JSON.parse(localStorage.getItem("aida-kf") || "{}")); } 
 const KMARKED = new Set();
 // Routenbild direkt vom scene7-CDN (die /content/dam-Variante liegt hinter Akamai)
 const routeImg = (m, w) => `https://s7e5a.scene7.com/is/image/aida/${m.split("?")[0].replace(/\/+$/, "").split("/").pop().replace(/\.[^.]+$/, "")}?wid=${w}&fmt=jpeg`;
-const tripUrl = id =>`https://aida.de/finden/${id}/PREMIUM?pax[adults]=2&pax[juveniles]=0&pax[children]=0&pax[babies]=0`;
+// Preis p. P. im Katalog: ab deutschen Häfen ohne Flug, sonst günstigster Tarif inkl. Flug (Tarifpreise gelten für 2 Personen)
+const DE_PORTS = new Set(["Hamburg", "Kiel", "Warnemünde", "Bremerhaven"]);
+function kPrice(t) {
+  if (t.flight || DE_PORTS.has(t.from)) return {pp: t.from_pp, flight: !!t.flight};
+  const fl = (t.tariffs || []).filter(r => r.flight).sort((a, b) => a.flight - b.flight)[0];
+  return fl ? {pp: Math.round(fl.flight / 2), flight: true, from: fl.flight_from} : {pp: t.from_pp, flight: false, none: true};
+}
+const tripUrl = id => `https://aida.de/finden/${id}/PREMIUM?pax[adults]=2&pax[juveniles]=0&pax[children]=0&pax[babies]=0`;
 async function renderKatalog() {
   const root = $("katalog");
   if (!DATA.catalog) { root.innerHTML = `<p class="mut">Noch kein Katalog abgerufen – der kommt täglich um 8 Uhr.</p>`; return; }
@@ -1887,8 +1895,8 @@ function kFiltered() {
     (!KF.region || t.region === KF.region) && (!KF.ship || t.ship === KF.ship) &&
     (!KF.from || (t.start || "") >= KF.from) && (!KF.to || (t.start || "").slice(0, 7) <= KF.to) &&
     (!KF.nmin || t.nights >= +KF.nmin) && (!KF.nmax || t.nights <= +KF.nmax) &&
-    (!KF.pmax || (t.from_pp && t.from_pp <= +KF.pmax)) && (!KF.camp || (t.campaigns && t.campaigns.length)));
-  const key = {start: t => t.start, price: t => t.from_pp || 1e9, nights: t => t.nights,
+    (!KF.pmax || (kPrice(t).pp && kPrice(t).pp <= +KF.pmax)) && (!KF.camp || (t.campaigns && t.campaigns.length)));
+  const key = {start: t => t.start, price: t => kPrice(t).pp || 1e9, nights: t => t.nights,
                free: t => t.fleet && t.fleet.free != null ? t.fleet.free : 1e9}[KF.sort] || (t => t.start);
   return r.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
 }
@@ -1896,16 +1904,16 @@ function drawKList() {
   const list = kFiltered(), box = $("klist");
   const tracked = new Set(DATA.tracked || []);
   box.innerHTML = `<p class="kmeta">${list.length.toLocaleString("de-DE")} Treffer</p>` + list.slice(0, KSHOW).map(t => {
-    const on = tracked.has(t.id), pend = KMARKED.has(t.id);
+    const on = tracked.has(t.id), pend = KMARKED.has(t.id), kp = kPrice(t);
     return `<div class="krow" id="kr_${t.id}">
       <div class="kbody" onclick="toggleK('${t.id}')">
       ${t.map ? `<img class="kmap" src="${routeImg(t.map, 240)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="kmap"></div>`}
       <div class="kmain"><div class="top">
         <h3>${t.title}</h3>
-        <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}${t.flight ? " · inkl. Flug" : ""}</span>
+        <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}</span>
         ${t.fleet && t.fleet.choice === false ? `<span class="m">Kabine wird zugeteilt</span>` : ""}
         ${t.fleet && t.fleet.choice !== false ? `<span class="m" title="freie Kabinen laut AIDA (je Kategorie max. 100 angezeigt), Stand ${d(t.fleet.date)}"><b>${t.fleet.free.toLocaleString("de-DE")}${t.fleet.capped.length ? "+" : ""} frei</b>${t.fleet.prev != null ? ` (${t.fleet.free - t.fleet.prev >= 0 ? "+" : ""}${t.fleet.free - t.fleet.prev})` : ""}</span>` : ""}
-        <span class="p">${t.from_pp ? "ab " + eur(t.from_pp) + " p. P." : ""}</span>
+        <span class="p">${kp.pp ? "ab " + eur(kp.pp) + " p. P." : ""}${kp.flight ? `<span class="pf">inkl. Flug${kp.from ? " ab " + kp.from : ""}</span>` : kp.none ? `<span class="pf">nur Seereise, kein Flug buchbar</span>` : ""}</span>
         <button class="mark${on || pend ? " on" : ""}" onclick="event.stopPropagation(); markK('${t.id}')">${on ? "✓ hinterlegt" : pend ? "✓ vorgemerkt" : "+ hinterlegen"}</button>
       </div>
       ${(t.campaigns || []).length || (t.notes || []).length ? `<div class="chips" style="margin:8px 0 0">${(t.campaigns || []).map(c => `<span class="chip camp">${c.name}${c.until ? " bis " + d(c.until) : ""}</span>`).join("")}${(t.notes || []).map(n => `<span class="chip">${n}</span>`).join("")}</div>` : ""}
