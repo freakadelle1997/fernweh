@@ -353,7 +353,220 @@ def _pricing(daten):
             "by_months": by_m, "by_weekday": by_wd}
 
 
-LONG_NIGHTS = 30                    # längere Reisen (Weltreise-Etappen) nicht in die Wert-Summe
+# Abstand zur Abfahrt in Tagen (Obergrenze) und Beschriftung
+BZ_BUCKETS = [(30, "0–1 Monat"), (60, "1–2 Monate"), (90, "2–3 Monate"), (180, "3–6 Monate"),
+              (270, "6–9 Monate"), (365, "9–12 Monate"), (540, "12–18 Monate"), (10 ** 6, "über 18 Monate")]
+BZ_COARSE = [(90, "0–3 Monate"), (180, "3–6 Monate"), (365, "6–12 Monate"), (10 ** 6, "über 12 Monate")]
+BZ_SCARCE = [(5, "1–5"), (20, "6–20"), (99, "21–99"), (10 ** 6, "100+")]
+
+
+def _bz_idx(n, buckets):
+    return next(i for i, (lim, _) in enumerate(buckets) if n <= lim)
+
+
+def _booking(daten):
+    """Bester Buchungszeitpunkt aus den täglichen Katalog-Momentaufnahmen (PREMIUM-Preis je
+    Kabinenart) und den Kategoriedaten der 4-Monats-Reisen. Liefert die Kennzahlen fürs
+    Dashboard; die Einschätzung je Reise macht _bz_advice daraus.
+    - Preisänderung je Monat nach Abstand zur Abfahrt (Rate je Kabinenart und Tag, hochgerechnet)
+    - Schwung: Reisen, die zuletzt teurer wurden, werden deutlich öfter wieder teurer
+    - Frühbucher-Stufen: Ende von „Frühbucher Plus“ bzw. „Frühbucher“ bringt einen Preisschritt
+    - Rücknahmen: Anteil der Erhöhungen, die AIDA kurz darauf exakt zurücknimmt
+    - Knappheit: wie schnell Kategorien mit wenigen freien Kabinen ganz verschwinden"""
+    import math
+    import statistics as st
+    ch = daten / "catalog-history"
+    H = {}
+    for f in sorted(ch.glob("*.json")) if ch.exists() else []:
+        trips = json.loads(f.read_text())["trips"]
+        if sum(1 for v in trips.values() if v.get("t")) > 500:      # nur Tage mit vollen Tarifdaten
+            H[f.stem] = trips
+    days = sorted(H)
+    cf = daten / "catalog.json"
+    cat = {t["id"]: t for t in json.loads(cf.read_text())["trips"]} if cf.exists() else {}
+    if len(days) < 8 or not cat:
+        return None
+    start = {j: date.fromisoformat(t["start"]) for j, t in cat.items() if t.get("start")}
+    lvl = lambda v: "FB+" if "Frühbucher Plus" in (v.get("notes") or []) else \
+        "FB" if "Frühbucher" in (v.get("notes") or []) else ""
+    nb = len(BZ_BUCKETS)
+    expo, up, down, net = [0] * nb, [0] * nb, [0] * nb, [0.0] * nb
+    nc = len(BZ_COARSE)                     # Frühbucher-Wechsel sind selten: nur grob nach Abstand
+    fb_expo = {"FB+": [0] * nc, "FB": [0] * nc}
+    fb_end = {"FB+": [0] * nc, "FB": [0] * nc}
+    fb_step = {"FB+": [], "FB": []}
+    reg = {}                                # Fahrgebiet -> [Kabinenart-Tage, Summe Änderung]
+    series = {}                             # (reise, kabinenart) -> [(tag, preis)]
+    ups = {}                                # reise -> Tage mit Erhöhung
+    for a, b in zip(days, days[1:]):
+        db = date.fromisoformat(b)
+        for j, vb in H[b].items():
+            va = H[a].get(j)
+            if not va or j not in start or start[j] < db:
+                continue
+            k = _bz_idx((start[j] - db).days, BZ_BUCKETS)
+            la, lb = lvl(va), lvl(vb)
+            ended = (la, lb) in (("FB+", "FB"), ("FB", ""))   # „FB+ -> nichts“ ist meist nur ein Etikettenwechsel
+            if la:
+                g = _bz_idx((start[j] - db).days, BZ_COARSE)
+                fb_expo[la][g] += 1
+                fb_end[la][g] += ended
+            steps = []
+            for typ, tp in (vb.get("t") or {}).items():
+                o, p = ((va.get("t") or {}).get(typ) or {}).get("PREMIUM"), tp.get("PREMIUM")
+                if not (o and p):
+                    continue
+                expo[k] += 1
+                r = reg.setdefault(cat[j].get("region") or "?", [0, 0.0])
+                r[0] += 1
+                if p != o:
+                    net[k] += (p - o) / o; r[1] += (p - o) / o
+                    up[k] += p > o; down[k] += p < o
+                    steps.append(100 * (p - o) / o)
+                    if p > o:
+                        ups.setdefault(j, []).append(b)
+            if ended and steps:
+                fb_step[la].append(st.median(steps))
+    for b in days:
+        for j, v in H[b].items():
+            for typ, tp in (v.get("t") or {}).items():
+                if tp.get("PREMIUM"):
+                    series.setdefault((j, typ), []).append((b, tp["PREMIUM"]))
+    # Rücknahmen: Erhöhung, danach exakt zurück auf den alten Preis
+    back, kept, gap = 0, 0, []
+    for s in series.values():
+        for i in range(1, len(s)):
+            if s[i][1] > s[i - 1][1]:
+                m = next((m for m in range(i + 1, len(s)) if s[m][1] < s[i][1]), None)
+                if m is not None and s[m][1] == s[i - 1][1]:
+                    back += 1
+                    gap.append((date.fromisoformat(s[m][0]) - date.fromisoformat(s[i][0])).days)
+                elif m is None:
+                    kept += 1
+    # Schwung: Fenster in zwei Hälften; Erhöhung in der ersten -> Erhöhung in der zweiten?
+    hz = min(30, (len(days) - 1) // 2)
+    mid, end = days[-1 - hz], days[-1]
+    first, second = days[-1 - 2 * hz], days[-1 - hz]
+    mom = [[0, 0, 0, 0] for _ in BZ_COARSE]  # [mit & wieder, mit, ohne & doch, ohne]
+    for j in H[end]:
+        if j not in start or j not in H[first]:
+            continue
+        g = _bz_idx((start[j] - date.fromisoformat(second)).days, BZ_COARSE)
+        a = any(first < x <= second for x in ups.get(j, []))
+        b = any(second < x <= end for x in ups.get(j, []))
+        mom[g][0 if a else 2] += b
+        mom[g][1 if a else 3] += 1
+    # Knappheit (4-Monats-Reisen): Kategorie verschwindet am Folgetag aus der Preisliste
+    sc_n, sc_gone = [0] * len(BZ_SCARCE), [0] * len(BZ_SCARCE)
+    for f in (daten / "fleet").glob("*.json") if (daten / "fleet").exists() else []:
+        h = json.loads(f.read_text())
+        P, C = h.get("prices") or {}, h.get("counts") or {}
+        ds = sorted(set(P) & set(C))
+        for a, b in zip(ds, ds[1:]):
+            for code, tp in P[a].items():
+                fr = C[a].get(code)
+                if not tp.get("PREMIUM") or not fr:
+                    continue
+                i = _bz_idx(fr, BZ_SCARCE)
+                sc_n[i] += 1
+                sc_gone[i] += not (P[b].get(code) or {}).get("PREMIUM")
+    p30 = lambda ev, n: round(100 * (1 - math.exp(-30 * ev / n)), 1) if n else None
+    rows, cum = [], 0.0
+    for k in reversed(range(nb)):            # von weit weg zur Abfahrt hin aufsummieren
+        if not expo[k]:
+            continue
+        lo = BZ_BUCKETS[k - 1][0] if k else 0
+        months = min(BZ_BUCKETS[k][0] - lo, 180) / 30 if k < nb - 1 else 0
+        rate = 100 * 30 * net[k] / expo[k]
+        rows.append({"label": BZ_BUCKETS[k][1], "n": expo[k], "up30": p30(up[k], expo[k]), "down30": p30(down[k], expo[k]),
+                     "exp30": round(rate, 2), "cum": round(cum, 1), "few": expo[k] < 3000})
+        cum += rate * months
+    rows.reverse()
+    return {
+        "days": [days[0], days[-1]], "n_days": len(days), "rows": rows, "total_cum": round(cum, 1),
+        "mom": [{"label": BZ_COARSE[g][1], "with": round(100 * m[0] / m[1]) if m[1] else None, "n_with": m[1],
+                 "without": round(100 * m[2] / m[3]) if m[3] else None, "n_without": m[3]} for g, m in enumerate(mom)],
+        "mom_days": hz,
+        "fb_step": {k: round(st.median(v), 1) if v else None for k, v in fb_step.items()},
+        "fb_n": {k: len(v) for k, v in fb_step.items()},
+        "fb_end30": {lv: [p30(fb_end[lv][g], fb_expo[lv][g]) if fb_expo[lv][g] >= 300 else None for g in range(nc)]
+                     for lv in fb_end},
+        "reversed": round(100 * back / (back + kept + 0.0), 1) if back + kept else None,
+        "reversed_days": st.median(gap) if gap else None,
+        "scarce": [{"label": BZ_SCARCE[i][1], "n": sc_n[i], "gone30": p30(sc_gone[i], sc_n[i])} for i in range(len(BZ_SCARCE))],
+        "regions": sorted([{"label": r, "exp30": round(100 * 30 * v[1] / v[0], 2), "n": v[0]}
+                           for r, v in reg.items() if v[0] >= 1000 and r != "?"], key=lambda x: -x["exp30"]),
+        # nur für _bz_advice, wird nicht ausgeliefert
+        "_ups": ups, "_level": {j: lvl(v) for j, v in H[end].items()}, "_start": start, "_end": end,
+    }
+
+
+def _bz_advice(B, j, focus=None, cats=None):
+    """Einschätzung für eine Reise: v = 2 bald buchen, 1 steigt leicht, 0 kein Zeitdruck; r = Gründe;
+    e = erwartete Preisänderung im nächsten Monat in %. focus = (Kategorie, freie Kabinen) der
+    Wunschkategorie; cats = freie Kabinen je Kategorie (4-Monats-Reisen)."""
+    if not B or j not in B["_start"]:
+        return None
+    end = date.fromisoformat(B["_end"])
+    n = (B["_start"][j] - end).days
+    if n < 0:
+        return None
+    k = _bz_idx(n, BZ_BUCKETS)
+    row = next((r for r in B["rows"] if r["label"] == BZ_BUCKETS[k][1]), None)
+    if not row:
+        return None
+    fz = lambda x: f"{x:+.1f}".replace(".", ",").replace("-", "−")
+    e, v, r = row["exp30"], 0, []
+    r.append(f"Reisen {BZ_BUCKETS[k][1]} vor Abfahrt wurden im Schnitt um {fz(e)} % pro Monat teurer; je Kabinenart "
+             f"{row['up30']:.0f} % Chance auf eine Erhöhung, {row['down30']:.0f} % auf eine Senkung"
+             f"{' (noch wenig Daten)' if row['few'] else ''}.")
+    if e >= 1.0 and not row["few"]:
+        v = 2
+    elif e >= 0.3:
+        v = 1
+    if row["down30"] and row["up30"] and row["down30"] >= 0.8 * row["up30"]:
+        r.append("In diesem Abstand sinken Preise fast so oft, wie sie steigen.")
+    # Schwung
+    g = _bz_idx(n, BZ_COARSE)
+    m = B["mom"][g]
+    recent = [x for x in B["_ups"].get(j, []) if (end - date.fromisoformat(x)).days < B["mom_days"]]
+    if recent and m["with"] is not None:
+        r.append(f"In den letzten {B['mom_days']} Tagen {len(recent)}× teurer geworden. Solche Reisen wurden in den "
+                 f"folgenden {B['mom_days']} Tagen zu {m['with']} % erneut teurer (sonst {m['without']} %).")
+        if m["with"] >= 30:
+            v = 2
+    # Kürzliche Erhöhung, die AIDA vielleicht zurücknimmt
+    if recent and B["reversed"]:
+        last = max(recent)
+        if (end - date.fromisoformat(last)).days <= 3:
+            r.append(f"Letzte Erhöhung am {date.fromisoformat(last).strftime('%d.%m.')}: {B['reversed']:.0f} % der Erhöhungen "
+                     f"hat AIDA bisher exakt zurückgenommen, meist nach {B['reversed_days']:.0f} Tagen.")
+    # Frühbucher-Stufe
+    lv = B["_level"].get(j)
+    if lv:
+        p = B["fb_end30"][lv][g]
+        step = B["fb_step"][lv]
+        if step:
+            r.append(f"{'Frühbucher Plus' if lv == 'FB+' else 'Frühbucher'} gilt noch. Endet die Stufe, steigt der Preis "
+                     f"typisch um {fz(step)} %" + (f"; in diesem Abstand passiert das bei {p:.0f} % der Reisen im Monat."
+                                                   if p is not None else "."))
+    # Knappheit
+    sc = {x["label"]: x["gone30"] for x in B["scarce"]}
+    if focus and focus[1] is not None and 0 < focus[1] <= 5 and sc.get("1–5"):
+        r.append(f"Wunschkategorie {focus[0]}: nur noch {focus[1]} frei. Kategorien mit 1–5 freien Kabinen verschwinden "
+                 f"zu {sc['1–5']:.0f} % innerhalb eines Monats.")
+        v = 2
+    elif focus and focus[1] == 0:
+        r.append(f"Wunschkategorie {focus[0]} ist derzeit ausgebucht.")
+    elif cats:
+        few = sorted(c for c, x in cats.items() if 0 < x <= 5)
+        if few and sc.get("1–5"):
+            r.append(f"Nur noch 1–5 frei in {', '.join(few)} – solche Kategorien verschwinden zu {sc['1–5']:.0f} % "
+                     f"innerhalb eines Monats.")
+    return {"v": v, "e": e, "r": r}
+
+
+LONG_NIGHTS = 30                   # längere Reisen (Weltreise-Etappen) nicht in die Wert-Summe
 BLOCK_ABS, BLOCK_MIN, BLOCK_SHARE = 50, 20, 0.25   # so viel auf einmal weg = Kontingent entzogen
 CAT_GONE_MIN = 5                    # ganze Kategorie ab so vielen Kabinen auf einmal weg = entzogen
 ASSIGN_DAYS = 30                    # in der Nacht auf diesen Tag vor Abfahrt teilt AIDA die Kabinen zu
@@ -808,6 +1021,11 @@ def build(con=None):
     for t in data:
         t["port_coords"] = {p["code"]: [ports[p["code"]]["lat"], ports[p["code"]]["lon"]]
                             for p in t.get("itinerary") or [] if "lat" in ports.get(p["code"], {})}
+    booking = _booking(daten)
+    for t in data:
+        fc = (t.get("focus") or {}).get("code")
+        ff = next((r["free"] for r in t.get("table") or [] if r["code"] == fc), None) if fc else None
+        t["bz"] = _bz_advice(booking, t["journey"], focus=(fc, ff) if fc else None)
     # Katalog (wöchentlich) als eigene Datei neben die Seite, wird erst bei Bedarf geladen
     cat_meta, cat_changes = None, None
     cf = daten / "catalog.json"
@@ -840,6 +1058,8 @@ def build(con=None):
                           "series": [[dd, sum(h["counts"][dd].values())] for dd in days[-30:]]}
             nfleet += 1
         cat_meta["fleet"] = nfleet
+        for t in cat["trips"]:
+            t["bz"] = _bz_advice(booking, t["id"], cats=(t.get("fleet") or {}).get("cats"))
         (OUT.parent / "catalog.json").write_text(json.dumps(cat, ensure_ascii=False, separators=(",", ":")))
         if pf.exists():
             (OUT.parent / "ports.json").write_text(json.dumps(
@@ -872,7 +1092,9 @@ def build(con=None):
     (OUT.parent / "version.json").write_text(json.dumps({"build": build_id}))
     _write_price_histories(con, data, daten, OUT.parent, [t["journey"] for t in data])
     _write_logs(daten, OUT.parent)
-    html = TEMPLATE.replace("__DATA__", json.dumps({"build": build_id, "ship_imgs": ship_imgs, "dashboard": _dashboard(daten), "pricing": _pricing(daten), "trips": data, "groups": GROUPS, "tracked": list(focus) or journeys,
+    html = TEMPLATE.replace("__DATA__", json.dumps({"build": build_id, "ship_imgs": ship_imgs, "dashboard": _dashboard(daten), "pricing": _pricing(daten),
+                                                    "booking": {k: v for k, v in (booking or {}).items() if not k.startswith("_")} or None,
+                                                    "trips": data, "groups": GROUPS, "tracked": list(focus) or journeys,
                                                     "catalog": cat_meta, "catalog_changes": cat_changes},
                                                    ensure_ascii=False))
     OUT.write_text(html)
@@ -1058,6 +1280,11 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .krow .top h3 { margin: 0; font-size: 15.5px; flex: 1 1 260px; }
 .krow .m { color: var(--text-2); font-size: 13px; }
 .krow .p { font-weight: 700; font-variant-numeric: tabular-nums; }
+.bz { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin: 0 0 18px; max-width: 760px; }
+.bz ul { margin: 6px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--text-2); }
+.bz li { margin: 3px 0; }
+.bzv { font-weight: 650; }
+.bzv.v2 { color: var(--up); } .bzv.v1 { color: var(--s4); } .bzv.v0 { color: var(--down); }
 .krow .pf { display: block; color: var(--text-2); font-size: 12px; font-weight: 400; }
 .krow .more { margin-top: 10px; }
 .krow .kbody { display: flex; gap: 14px; align-items: flex-start; cursor: pointer; }
@@ -1751,6 +1978,7 @@ function renderDetail(ti) {
       ${t.offer ? `<div class="offer">${t.offer.from_pp ? `<span><span class="from">ab ${eur(t.offer.from_pp)}</span> p. P. (${({IND: "PREMIUM", INDAI: "PREMIUM ALL IN", CLA: "CLASSIC", LIG: "LIGHT", COMAI: "COMFORT ALL IN"})[t.offer.from_tariff] || t.offer.from_tariff})</span>` : ""}
         ${(t.offer.amenities || []).map(a => `<span class="mut">${a}</span>`).join("")}</div>
         <div class="chips">${offerChips(t)}</div>` : ""}
+      ${bzBox(t.bz, t.offer && t.offer.from_pp)}
       ${t.cabin_choice === false ? `<div class="warnbox"><b>Kabine wird zugeteilt:</b> Für diese Reise lässt sich keine bestimmte Kabinennummer wählen – AIDA teilt die Kabine bei der Buchung zu.</div>` : ""}
       <div class="maps">
         ${t.map_file ? `<figure><img class="routemap" src="${t.map_file}" alt="Route ${t.title}"><figcaption class="routecap">Reiseroute laut AIDA</figcaption></figure>` : ""}
@@ -1910,7 +2138,7 @@ function drawKList() {
       ${t.map ? `<img class="kmap" src="${routeImg(t.map, 280)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="kmap"></div>`}
       <div class="kmain"><div class="top">
         <h3>${t.title}</h3>
-        <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}</span>
+        <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}${t.bz ? ` · <span class="bzv v${t.bz.v}">${BZ_LABEL[t.bz.v]}</span>` : ""}</span>
         ${t.fleet && t.fleet.choice === false ? `<span class="m">Kabine wird zugeteilt</span>` : ""}
         ${t.fleet && t.fleet.choice !== false ? `<span class="m" title="freie Kabinen laut AIDA (je Kategorie max. 100 angezeigt), Stand ${d(t.fleet.date)}"><b>${t.fleet.free.toLocaleString("de-DE")}${t.fleet.capped.length ? "+" : ""} frei</b>${t.fleet.prev != null ? ` (${t.fleet.free - t.fleet.prev >= 0 ? "+" : ""}${t.fleet.free - t.fleet.prev})` : ""}</span>` : ""}
         <span class="p">${kp.pp ? "ab " + eur(kp.pp) + " p. P." : ""}${kp.flight ? `<span class="pf">inkl. Flug${kp.from ? " ab " + kp.from : ""}</span>` : kp.none ? `<span class="pf">nur Seereise, kein Flug buchbar</span>` : ""}</span>
@@ -1935,6 +2163,7 @@ function toggleK(id) {
   more.innerHTML = `<div class="maps">
       ${t.map ? `<figure><img class="routemap" src="${routeImg(t.map, 1000)}" alt="Route ${t.title}" onerror="this.parentNode.remove()"><figcaption class="routecap">Reiseroute laut AIDA</figcaption></figure>` : ""}
       <figure><div class="leafmap" id="km_${id}"></div><figcaption class="routecap">Häfen laut Reiseverlauf · Karte © OpenStreetMap</figcaption></figure></div>
+    ${bzBox(t.bz, kPrice(t).pp)}
     ${t.itinerary ? itineraryFromDetail(t.itinerary.map((p, i) => Object.assign({day: i + 1}, p))) : ""}
     ${t.fleet && t.fleet.choice !== false ? `<div class="sect">Freie Kabinen je Kategorie (Stand ${d(t.fleet.date)})</div>
       <p class="kmeta">${Object.entries(t.fleet.cats).sort().map(([k, v]) => `<b>${k}</b> ${v}${v >= 100 ? "+" : ""}`).join(" · ")}
@@ -2097,6 +2326,59 @@ function restoreScroll() {
   } catch {}
 }
 
+// ---------- Bester Buchungszeitpunkt ----------
+const BZ_LABEL = ["Kein Zeitdruck", "Steigt leicht", "Bald buchen"];
+const pz = (v, dig = 1) => v == null ? "–" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(dig).replace(".", ",") + " %";
+function bzBox(bz, pp) {
+  if (!bz || !DATA.booking) return "";
+  const em = pp && bz.e ? ` · erwartet ${bz.e > 0 ? "+" : "−"}${eur(Math.abs(Math.round(pp * bz.e / 100)))} p. P. im nächsten Monat` : "";
+  return `<div class="bz"><div class="sect" style="margin:0 0 4px">Buchungszeitpunkt</div>
+    <span class="bzv v${bz.v}">${BZ_LABEL[bz.v]}</span><span class="mut">${em}</span>
+    <ul>${bz.r.map(x => `<li>${x}</li>`).join("")}</ul>
+    <p class="note" style="margin:6px 0 0">Erfahrungswerte aus ${DATA.booking.n_days} Tagen Katalogdaten aller AIDA-Reisen, täglich neu berechnet – keine Garantie.</p></div>`;
+}
+function renderBooking() {
+  const B = DATA.booking;
+  const box = document.createElement("div");
+  box.style.marginBottom = "36px";
+  $("dash").prepend(box);
+  if (!B) { box.innerHTML = `<div class="sect">Bester Buchungszeitpunkt</div><p class="mut">Entsteht ab acht Tagen mit vollständigen Tarifdaten.</p>`; return; }
+  const solid = B.rows.filter(r => !r.few);
+  const peak = solid.reduce((a, r) => !a || r.exp30 > a.exp30 ? r : a, null);
+  const near = B.rows.filter(r => ["0–1 Monat", "1–2 Monate", "2–3 Monate"].includes(r.label));
+  const far = B.rows.filter(r => ["12–18 Monate", "über 18 Monate"].includes(r.label));
+  const pool = B.mom.reduce((s, m) => (s.a += m.with * m.n_with / 100, s.n += m.n_with, s.b += m.without * m.n_without / 100, s.m += m.n_without, s), {a: 0, n: 0, b: 0, m: 0});
+  box.innerHTML = `<div class="sect">Bester Buchungszeitpunkt <span class="mut" style="font-weight:400">· ${B.n_days} Tage Katalogdaten (${d(B.days[0])} – ${d(B.days[1])}), PREMIUM-Preis je Reise und Kabinenart</span></div>
+    <div class="bz"><b>Fazit:</b> Früh buchen lohnt sich. Von 18 Monaten vor Abfahrt bis zur Abfahrt steigen die Preise im Schnitt um <b>${pz(B.total_cum)}</b>.
+      ${far.length ? `Über 12 Monate vorher sind sie fast stabil (${far.map(r => pz(r.exp30, 2)).join(" bzw. ")} pro Monat).` : ""}
+      ${peak ? `Am stärksten steigen sie ${peak.label} vor Abfahrt (${pz(peak.exp30, 2)} pro Monat).` : ""}
+      Senkungen gibt es vor allem in den letzten 3 Monaten (${near.map(r => r.down30 != null ? Math.round(r.down30) + " %" : "–").join(" / ")} Chance je Kabinenart und Monat), und ${pz(B.reversed).replace("+", "")} aller Erhöhungen hat AIDA kurz darauf exakt zurückgenommen (meist nach ${B.reversed_days} Tagen).
+      Wer auf ein Last-Minute-Schnäppchen wartet, wettet also gegen den Trend. Ein klares Warnsignal ist eine Reise, die gerade teurer geworden ist: Sie wird ${Math.round(100 * pool.a / pool.n)} % statt ${Math.round(100 * pool.b / pool.m)} % wahrscheinlich in den nächsten ${B.mom_days} Tagen noch einmal teurer.</div>
+    <div class="tiles">
+      <div class="tile"><div class="k">Anstieg bis Abfahrt</div><div class="v">${pz(B.total_cum)}</div><div class="d">ab 18 Monaten vorher (Schnitt)</div></div>
+      <div class="tile"><div class="k">Ende „Frühbucher Plus“</div><div class="v">${pz(B.fb_step["FB+"])}</div><div class="d">Preisschritt (Median, ${B.fb_n["FB+"]} Fälle)</div></div>
+      <div class="tile"><div class="k">Ende „Frühbucher“</div><div class="v">${pz(B.fb_step["FB"])}</div><div class="d">Preisschritt (Median, ${B.fb_n["FB"]} Fälle)</div></div>
+      <div class="tile"><div class="k">Zurückgenommen</div><div class="v">${pz(B.reversed).replace("+", "")}</div><div class="d">der Erhöhungen, meist nach ${B.reversed_days} Tagen</div></div>
+    </div>
+    <div class="charts">
+      <div class="chart"><h3>Preisentwicklung nach Abstand zur Abfahrt</h3><table class="chg">
+        <tr><td class="mut">Abstand</td><td class="t mut">rauf</td><td class="t mut">runter</td><td class="t mut">Ø/Monat</td><td class="t mut">ggü. 18 M.</td></tr>
+        ${B.rows.map(r => `<tr><td>${r.label}${r.few ? ' <span class="mut">(wenig Daten)</span>' : ""}</td><td class="t">${Math.round(r.up30)} %</td><td class="t">${Math.round(r.down30)} %</td><td class="t">${pz(r.exp30, 2)}</td><td class="t">${r.label === "über 18 Monate" ? "–" : pz(r.cum)}</td></tr>`).join("")}</table>
+        <p class="note">rauf/runter = Chance je Kabinenart, im nächsten Monat teurer bzw. billiger zu werden. ggü. 18 M. = so viel teurer ist es zu Beginn dieses Zeitraums im Schnitt als 18 Monate vor Abfahrt.</p></div>
+      <div class="chart"><h3>Schwung: gerade teurer geworden → bald wieder?</h3><table class="chg">
+        <tr><td class="mut">Abstand</td><td class="t mut">nach Erhöhung</td><td class="t mut">ohne</td></tr>
+        ${B.mom.map(m => `<tr><td>${m.label}</td><td class="t">${m.with ?? "–"} % <span class="mut">(${m.n_with})</span></td><td class="t">${m.without ?? "–"} % <span class="mut">(${m.n_without})</span></td></tr>`).join("")}</table>
+        <p class="note">Anteil der Reisen, die in ${B.mom_days} Tagen erneut teurer wurden – je nachdem, ob sie in den ${B.mom_days} Tagen davor schon teurer geworden waren (Anzahl Reisen in Klammern).</p></div>
+      <div class="chart"><h3>Knappheit: Kategorie weg innerhalb eines Monats</h3><table class="chg">
+        <tr><td class="mut">freie Kabinen</td><td class="t mut">weg in 30 Tagen</td></tr>
+        ${B.scarce.map(s => `<tr><td>${s.label}</td><td class="t">${s.gone30 != null ? Math.round(s.gone30) + " %" : "–"}</td></tr>`).join("")}</table>
+        <p class="note">Reisen der nächsten 4 Monate: Wie oft eine Unterkategorie (z. B. IA) innerhalb eines Monats ganz aus der Preisliste fällt.</p></div>
+      <div class="chart"><h3>Nach Fahrgebiet</h3><table class="chg">
+        ${B.regions.map(r => `<tr><td>${r.label}</td><td class="t">${pz(r.exp30, 2)} pro Monat</td></tr>`).join("")}</table>
+        <p class="note">Ø Preisänderung je Kabinenart und Monat über alle Abstände.</p></div>
+    </div>`;
+}
+
 // ---------- Dashboard (Tageszahlen des 8-Uhr-Laufs) ----------
 function renderPricing() {
   const P = DATA.pricing;
@@ -2189,6 +2471,7 @@ function renderDash() {
     charts.push(new Chart($(id), {type: "line", data: {labels: lab, datasets: sets.map(([label, key, col]) => ({
       label, data: D.map(x => x[key] ?? null), borderColor: css(col), backgroundColor: css(col), spanGaps: true}))}, options: o}));
   };
+  renderBooking();
   renderPricing();
   {   // ein Graph: Stand je Tag, Tooltip mit neu/entfallen
     const K = D.filter(x => x.total != null);
