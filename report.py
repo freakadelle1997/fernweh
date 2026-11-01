@@ -479,7 +479,8 @@ def _booking(daten):
         months = min(BZ_BUCKETS[k][0] - lo, 180) / 30 if k < nb - 1 else 0
         rate = 100 * 30 * net[k] / expo[k]
         rows.append({"label": BZ_BUCKETS[k][1], "n": expo[k], "up30": p30(up[k], expo[k]), "down30": p30(down[k], expo[k]),
-                     "exp30": round(rate, 2), "cum": round(cum, 1), "few": expo[k] < 3000})
+                     "exp30": round(rate, 2), "cum": round(cum, 1), "few": expo[k] < 3000,
+                     "m": BZ_BUCKETS[k][0] // 30 if k < nb - 1 else None})
         cum += rate * months
     rows.reverse()
     return {
@@ -1284,6 +1285,7 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .bz ul { margin: 6px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--text-2); }
 .bz li { margin: 3px 0; }
 .bzv { font-weight: 650; }
+.bzr { display: grid; gap: 10px; }
 .bzv.v2 { color: var(--up); } .bzv.v1 { color: var(--s4); } .bzv.v0 { color: var(--down); }
 .krow .pf { display: block; color: var(--text-2); font-size: 12px; font-weight: 400; }
 .krow .more { margin-top: 10px; }
@@ -2342,41 +2344,67 @@ function renderBooking() {
   const box = document.createElement("div");
   box.style.marginBottom = "36px";
   $("dash").prepend(box);
-  if (!B) { box.innerHTML = `<div class="sect">Bester Buchungszeitpunkt</div><p class="mut">Entsteht ab acht Tagen mit vollständigen Tarifdaten.</p>`; return; }
+  if (!B) { box.innerHTML = `<div class="sect">Wann buchen?</div><p class="mut">Entsteht ab acht Tagen mit vollständigen Tarifdaten.</p>`; return; }
   const solid = B.rows.filter(r => !r.few);
   const peak = solid.reduce((a, r) => !a || r.exp30 > a.exp30 ? r : a, null);
-  const near = B.rows.filter(r => ["0–1 Monat", "1–2 Monate", "2–3 Monate"].includes(r.label));
-  const far = B.rows.filter(r => ["12–18 Monate", "über 18 Monate"].includes(r.label));
+  const wavg = (rows, k) => { const n = rows.reduce((s, r) => s + r.n, 0); return n ? Math.round(rows.reduce((s, r) => s + r[k] * r.n, 0) / n) : null; };
+  const near = B.rows.filter(r => r.m && r.m <= 3);
   const pool = B.mom.reduce((s, m) => (s.a += m.with * m.n_with / 100, s.n += m.n_with, s.b += m.without * m.n_without / 100, s.m += m.n_without, s), {a: 0, n: 0, b: 0, m: 0});
-  box.innerHTML = `<div class="sect">Bester Buchungszeitpunkt <span class="mut" style="font-weight:400">· ${B.n_days} Tage Katalogdaten (${d(B.days[0])} – ${d(B.days[1])}), PREMIUM-Preis je Reise und Kabinenart</span></div>
-    <div class="bz"><b>Fazit:</b> Früh buchen lohnt sich. Von 18 Monaten vor Abfahrt bis zur Abfahrt steigen die Preise im Schnitt um <b>${pz(B.total_cum)}</b>.
-      ${far.length ? `Über 12 Monate vorher sind sie fast stabil (${far.map(r => pz(r.exp30, 2)).join(" bzw. ")} pro Monat).` : ""}
-      ${peak ? `Am stärksten steigen sie ${peak.label} vor Abfahrt (${pz(peak.exp30, 2)} pro Monat).` : ""}
-      Senkungen gibt es vor allem in den letzten 3 Monaten (${near.map(r => r.down30 != null ? Math.round(r.down30) + " %" : "–").join(" / ")} Chance je Kabinenart und Monat), und ${pz(B.reversed).replace("+", "")} aller Erhöhungen hat AIDA kurz darauf exakt zurückgenommen (meist nach ${B.reversed_days} Tagen).
-      Wer auf ein Last-Minute-Schnäppchen wartet, wettet also gegen den Trend. Ein klares Warnsignal ist eine Reise, die gerade teurer geworden ist: Sie wird ${Math.round(100 * pool.a / pool.n)} % statt ${Math.round(100 * pool.b / pool.m)} % wahrscheinlich in den nächsten ${B.mom_days} Tagen noch einmal teurer.</div>
-    <div class="tiles">
-      <div class="tile"><div class="k">Anstieg bis Abfahrt</div><div class="v">${pz(B.total_cum)}</div><div class="d">ab 18 Monaten vorher (Schnitt)</div></div>
-      <div class="tile"><div class="k">Ende „Frühbucher Plus“</div><div class="v">${pz(B.fb_step["FB+"])}</div><div class="d">Preisschritt (Median, ${B.fb_n["FB+"]} Fälle)</div></div>
-      <div class="tile"><div class="k">Ende „Frühbucher“</div><div class="v">${pz(B.fb_step["FB"])}</div><div class="d">Preisschritt (Median, ${B.fb_n["FB"]} Fälle)</div></div>
-      <div class="tile"><div class="k">Zurückgenommen</div><div class="v">${pz(B.reversed).replace("+", "")}</div><div class="d">der Erhöhungen, meist nach ${B.reversed_days} Tagen</div></div>
-    </div>
+  const sc = B.scarce[0] && B.scarce[0].gone30 != null ? B.scarce[0] : null;
+  const fz = v => String(v).replace(".", ",").replace("-", "−");
+  // Preisverlauf als Beispielreise: 1.000 € 18 Monate vor Abfahrt
+  const pts = B.rows.filter(r => r.m).map(r => ({x: r.m, y: Math.round(1000 * (1 + r.cum / 100))}));
+  pts.push({x: 0, y: Math.round(1000 * (1 + B.total_cum / 100))});
+  pts.sort((a, b) => b.x - a.x);
+  const at = m => (pts.find(p => p.x === m) || {}).y;
+  const rule = (h, t) => `<div class="tile"><div style="font-weight:650;margin-bottom:4px">${h}</div><div style="font-size:14px;color:var(--text-2)">${t}</div></div>`;
+  box.innerHTML = `<div class="sect">Wann buchen?</div>
+    <p style="font-size:17px;margin:0 0 14px;max-width:760px"><b>Früh buchen lohnt sich.</b> Eine Kabine, die 18 Monate vor Abfahrt 1.000 € kostet, kostet kurz vor Abfahrt im Schnitt rund <b>${eur(at(0))}</b>.</p>
     <div class="charts">
-      <div class="chart"><h3>Preisentwicklung nach Abstand zur Abfahrt</h3><table class="chg">
-        <tr><td class="mut">Abstand</td><td class="t mut">rauf</td><td class="t mut">runter</td><td class="t mut">Ø/Monat</td><td class="t mut">ggü. 18 M.</td></tr>
-        ${B.rows.map(r => `<tr><td>${r.label}${r.few ? ' <span class="mut">(wenig Daten)</span>' : ""}</td><td class="t">${Math.round(r.up30)} %</td><td class="t">${Math.round(r.down30)} %</td><td class="t">${pz(r.exp30, 2)}</td><td class="t">${r.label === "über 18 Monate" ? "–" : pz(r.cum)}</td></tr>`).join("")}</table>
-        <p class="note">rauf/runter = Chance je Kabinenart, im nächsten Monat teurer bzw. billiger zu werden. ggü. 18 M. = so viel teurer ist es zu Beginn dieses Zeitraums im Schnitt als 18 Monate vor Abfahrt.</p></div>
-      <div class="chart"><h3>Schwung: gerade teurer geworden → bald wieder?</h3><table class="chg">
-        <tr><td class="mut">Abstand</td><td class="t mut">nach Erhöhung</td><td class="t mut">ohne</td></tr>
-        ${B.mom.map(m => `<tr><td>${m.label}</td><td class="t">${m.with ?? "–"} % <span class="mut">(${m.n_with})</span></td><td class="t">${m.without ?? "–"} % <span class="mut">(${m.n_without})</span></td></tr>`).join("")}</table>
-        <p class="note">Anteil der Reisen, die in ${B.mom_days} Tagen erneut teurer wurden – je nachdem, ob sie in den ${B.mom_days} Tagen davor schon teurer geworden waren (Anzahl Reisen in Klammern).</p></div>
-      <div class="chart"><h3>Knappheit: Kategorie weg innerhalb eines Monats</h3><table class="chg">
-        <tr><td class="mut">freie Kabinen</td><td class="t mut">weg in 30 Tagen</td></tr>
-        ${B.scarce.map(s => `<tr><td>${s.label}</td><td class="t">${s.gone30 != null ? Math.round(s.gone30) + " %" : "–"}</td></tr>`).join("")}</table>
-        <p class="note">Reisen der nächsten 4 Monate: Wie oft eine Unterkategorie (z. B. IA) innerhalb eines Monats ganz aus der Preisliste fällt.</p></div>
-      <div class="chart"><h3>Nach Fahrgebiet</h3><table class="chg">
-        ${B.regions.map(r => `<tr><td>${r.label}</td><td class="t">${pz(r.exp30, 2)} pro Monat</td></tr>`).join("")}</table>
-        <p class="note">Ø Preisänderung je Kabinenart und Monat über alle Abstände.</p></div>
-    </div>`;
+      <div class="chart"><h3>So entwickelt sich der Preis bis zur Abfahrt</h3><div class="box"><canvas id="bz1"></canvas></div>
+        <p class="note">Beispiel: Kabine kostet 18 Monate vorher 1.000 €. Durchschnitt aller AIDA-Reisen und Kabinenarten.${B.rows.some(r => r.few) ? " Gestrichelt: letzter Monat, dafür gibt es noch wenig Daten." : ""}</p></div>
+      <div class="chart"><h3>Was heißt das?</h3>
+        <div class="bzr">
+          ${rule("Am besten über ein Jahr vorher buchen", `Bis 12 Monate vor Abfahrt bleiben die Preise fast gleich. Danach steigen sie${peak ? `, am schnellsten ${peak.label} vorher` : ""}.`)}
+          ${rule("Gerade teurer geworden? Nicht lange warten", `Dann wird die Reise oft gleich nochmal teurer: bei <b>${Math.round(100 * pool.a / pool.n)} von 100</b> Reisen innerhalb von ${B.mom_days} Tagen. Ohne vorherige Erhöhung nur bei ${Math.round(100 * pool.b / pool.m)} von 100.`)}
+          ${B.fb_step["FB+"] != null ? rule("Frühbucher-Frist beachten", `Endet „Frühbucher Plus“, steigt der Preis meist um <b>${fz(B.fb_step["FB+"])} %</b>${B.fb_step["FB"] != null ? `, am Ende von „Frühbucher“ um <b>${fz(B.fb_step["FB"])} %</b>` : ""}.`) : ""}
+          ${near.length ? rule("Last Minute ist Glückssache", `In den letzten 3 Monaten wird eine Kabinenart im Lauf eines Monats bei ${wavg(near, "down30")} von 100 Reisen billiger, aber bei ${wavg(near, "up30")} von 100 teurer.`) : ""}
+          ${sc ? rule("Nur noch wenige Kabinen frei? Zugreifen", `Sind in einer Kategorie nur noch 1–5 Kabinen frei, ist sie bei ${Math.round(sc.gone30)} von 100 Reisen innerhalb eines Monats weg.`) : ""}
+        </div></div>
+    </div>
+    <div class="bz" style="max-width:none"><b>Die Etiketten bei den Reisen</b> (Meine Reisen und Katalog)
+      <ul><li><span class="bzv v2">Bald buchen</span>: Der Preis steigt wahrscheinlich bald – weil die Reise gerade teurer geworden ist, sie in einer teuren Phase steckt (über 1 % pro Monat) oder die Wunschkategorie fast ausgebucht ist.</li>
+        <li><span class="bzv v1">Steigt leicht</span>: Der Preis steigt voraussichtlich, aber langsam (0,3–1 % pro Monat).</li>
+        <li><span class="bzv v0">Kein Zeitdruck</span>: Der Preis bleibt voraussichtlich etwa gleich. Warten kostet wenig, bringt aber meist auch nichts.</li></ul>
+      Warum eine Reise welches Etikett hat, steht in der Reise selbst unter „Buchungszeitpunkt“.</div>
+    <details style="margin-top:14px"><summary style="cursor:pointer;color:var(--text-2)">Alle Zahlen und wie sie entstehen</summary>
+      <p class="note" style="margin:10px 0">Grundlage: ${B.n_days} Tage Katalogdaten (${d(B.days[0])} – ${d(B.days[1])}). Verglichen wird jeden Tag der PREMIUM-Preis jeder Reise und Kabinenart mit dem Vortag. Die Auswertung rechnet bei jedem Lauf neu und wird mit jedem Tag genauer. Sie zeigt, was bisher typisch war – keine Garantie für eine einzelne Reise.</p>
+      <div class="charts">
+        <div class="chart"><h3>Nach Abstand zur Abfahrt</h3><table class="chg">
+          <tr><td class="mut">Abstand</td><td class="t mut">teurer</td><td class="t mut">billiger</td><td class="t mut">im Schnitt</td></tr>
+          ${B.rows.map(r => `<tr><td>${r.label}${r.few ? ' <span class="mut">(wenig Daten)</span>' : ""}</td><td class="t">${Math.round(r.up30)} %</td><td class="t">${Math.round(r.down30)} %</td><td class="t">${pz(r.exp30, 2)}</td></tr>`).join("")}</table>
+          <p class="note">Je Kabinenart: Chance, innerhalb eines Monats teurer bzw. billiger zu werden, und durchschnittliche Preisänderung pro Monat.</p></div>
+        <div class="chart"><h3>Nach einer Erhöhung</h3><table class="chg">
+          <tr><td class="mut">Abstand</td><td class="t mut">gerade teurer geworden</td><td class="t mut">sonst</td></tr>
+          ${B.mom.map(m => `<tr><td>${m.label}</td><td class="t">${m.with ?? "–"} % <span class="mut">(${m.n_with})</span></td><td class="t">${m.without ?? "–"} % <span class="mut">(${m.n_without})</span></td></tr>`).join("")}</table>
+          <p class="note">Anteil der Reisen, die in den nächsten ${B.mom_days} Tagen erneut teurer wurden (Anzahl Reisen in Klammern). Umgekehrt nimmt AIDA ${fz(B.reversed)} % aller Erhöhungen später exakt zurück, meist nach ${B.reversed_days} Tagen.</p></div>
+        <div class="chart"><h3>Freie Kabinen in einer Kategorie</h3><table class="chg">
+          <tr><td class="mut">frei</td><td class="t mut">innerhalb eines Monats ausgebucht</td></tr>
+          ${B.scarce.map(s => `<tr><td>${s.label}</td><td class="t">${s.gone30 != null ? Math.round(s.gone30) + " %" : "–"}</td></tr>`).join("")}</table>
+          <p class="note">Nur Reisen der nächsten 4 Monate (nur für die gibt es freie Kabinen).</p></div>
+        <div class="chart"><h3>Nach Fahrgebiet</h3><table class="chg">
+          ${B.regions.map(r => `<tr><td>${r.label}</td><td class="t">${pz(r.exp30, 2)} pro Monat</td></tr>`).join("")}</table>
+          <p class="note">Durchschnittliche Preisänderung je Kabinenart und Monat.</p></div>
+      </div></details>`;
+  const few = B.rows.find(r => r.m === 1 && r.few);
+  charts.push(new Chart($("bz1"), {type: "line", data: {datasets: [{label: "Preis", data: pts, borderColor: css("--s1"), backgroundColor: css("--s1"),
+      segment: {borderDash: c => few && c.p1.parsed.x === 0 ? [5, 4] : undefined}}]},
+    options: {responsive: true, maintainAspectRatio: false, animation: false, interaction: {mode: "nearest", intersect: false},
+      plugins: {legend: {display: false}, tooltip: {callbacks: {title: c => c[0].parsed.x ? `${c[0].parsed.x} Monate vor Abfahrt` : "Abfahrt", label: c => " " + eur(c.parsed.y)}}},
+      scales: {x: {type: "linear", reverse: true, min: 0, max: 18, grid: {display: false},
+                   ticks: {color: css("--text-2"), stepSize: 3, callback: v => v ? v + " M." : "Abfahrt"}, title: {display: true, text: "Monate vor Abfahrt", color: css("--text-2")}},
+               y: {grid: {color: css("--grid")}, ticks: {color: css("--text-2"), callback: v => eur(v)}}},
+      elements: {line: {borderWidth: 2, tension: 0}, point: {radius: 4}}}}));
 }
 
 // ---------- Dashboard (Tageszahlen des 8-Uhr-Laufs) ----------
