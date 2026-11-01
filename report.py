@@ -1059,6 +1059,11 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .krow .m { color: var(--text-2); font-size: 13px; }
 .krow .p { font-weight: 700; font-variant-numeric: tabular-nums; }
 .krow .more { margin-top: 10px; }
+.krow .kbody { display: flex; gap: 14px; align-items: flex-start; cursor: pointer; }
+.krow .kmain { flex: 1; min-width: 0; }
+.kmap { flex: 0 0 120px; width: 120px; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px;
+  background: #eef2f7; }
+@media (max-width: 760px) { .kmap { flex-basis: 84px; width: 84px; } }
 .mark { border: 1px solid var(--s1); color: var(--s1); background: none; border-radius: 8px; padding: 5px 10px;
   font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .mark.on { background: var(--s1); color: #fff; cursor: default; }
@@ -1119,6 +1124,13 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .itin td { padding: 5px 8px; border-top: 1px solid var(--border); }
 .itin td.t { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .itin tr.sea td { color: var(--muted); font-style: italic; }
+@media (max-width: 760px) {
+  .itin { table-layout: fixed; }
+  .itin td { padding: 4px 5px; }
+  .itin td:first-child { width: 46px; }
+  .itin td:nth-child(n+3) { width: 62px; }
+  .itin td:nth-child(2) { white-space: normal; overflow-wrap: anywhere; }
+}
 .refills { margin: 0 0 22px; font-size: 14px; }
 .refills li { margin: 2px 0; }
 .cabgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin-top: 8px; }
@@ -1828,7 +1840,9 @@ let KAT = null, KPORTS = {}, KSHOW = 50;
 const KF = {q: "", region: "", ship: "", from: "", to: "", nmin: "", nmax: "", pmax: "", camp: false, sort: "start"};
 try { Object.assign(KF, JSON.parse(localStorage.getItem("aida-kf") || "{}")); } catch {}
 const KMARKED = new Set();
-const tripUrl = id => `https://aida.de/finden/${id}/PREMIUM?pax[adults]=2&pax[juveniles]=0&pax[children]=0&pax[babies]=0`;
+// Routenbild direkt vom scene7-CDN (die /content/dam-Variante liegt hinter Akamai)
+const routeImg = (m, w) => `https://s7e5a.scene7.com/is/image/aida/${m.split("?")[0].replace(/\/+$/, "").split("/").pop().replace(/\.[^.]+$/, "")}?wid=${w}&fmt=jpeg`;
+const tripUrl = id =>`https://aida.de/finden/${id}/PREMIUM?pax[adults]=2&pax[juveniles]=0&pax[children]=0&pax[babies]=0`;
 async function renderKatalog() {
   const root = $("katalog");
   if (!DATA.catalog) { root.innerHTML = `<p class="mut">Noch kein Katalog abgerufen – der kommt täglich um 8 Uhr.</p>`; return; }
@@ -1884,7 +1898,9 @@ function drawKList() {
   box.innerHTML = `<p class="kmeta">${list.length.toLocaleString("de-DE")} Treffer</p>` + list.slice(0, KSHOW).map(t => {
     const on = tracked.has(t.id), pend = KMARKED.has(t.id);
     return `<div class="krow" id="kr_${t.id}">
-      <div class="top" onclick="toggleK('${t.id}')">
+      <div class="kbody" onclick="toggleK('${t.id}')">
+      ${t.map ? `<img class="kmap" src="${routeImg(t.map, 240)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="kmap"></div>`}
+      <div class="kmain"><div class="top">
         <h3>${t.title}</h3>
         <span class="m">${shipName(t.ship)} · ${d(t.start)} – ${d(t.end)} · ${t.nights} Nächte${t.region ? " · " + t.region : ""}${t.flight ? " · inkl. Flug" : ""}</span>
         ${t.fleet && t.fleet.choice === false ? `<span class="m">Kabine wird zugeteilt</span>` : ""}
@@ -1893,6 +1909,7 @@ function drawKList() {
         <button class="mark${on || pend ? " on" : ""}" onclick="event.stopPropagation(); markK('${t.id}')">${on ? "✓ hinterlegt" : pend ? "✓ vorgemerkt" : "+ hinterlegen"}</button>
       </div>
       ${(t.campaigns || []).length || (t.notes || []).length ? `<div class="chips" style="margin:8px 0 0">${(t.campaigns || []).map(c => `<span class="chip camp">${c.name}${c.until ? " bis " + d(c.until) : ""}</span>`).join("")}${(t.notes || []).map(n => `<span class="chip">${n}</span>`).join("")}</div>` : ""}
+      </div></div>
       <div class="more" hidden></div></div>`;
   }).join("") + (list.length > KSHOW ? `<button class="mark" onclick="KSHOW += 50; drawKList()">Weitere anzeigen</button>` : "");
   if (KOPEN && document.getElementById("kr_" + KOPEN)) {
@@ -1907,7 +1924,9 @@ function toggleK(id) {
   if (!more.hidden) { more.hidden = true; return; }
   const t = KAT.find(x => x.id === id);
   more.hidden = false;
-  more.innerHTML = `<div class="leafmap" id="km_${id}" style="height:300px"></div>
+  more.innerHTML = `<div class="maps">
+      ${t.map ? `<figure><img class="routemap" src="${routeImg(t.map, 1000)}" alt="Route ${t.title}" onerror="this.parentNode.remove()"><figcaption class="routecap">Reiseroute laut AIDA</figcaption></figure>` : ""}
+      <figure><div class="leafmap" id="km_${id}"></div><figcaption class="routecap">Häfen laut Reiseverlauf · Karte © OpenStreetMap</figcaption></figure></div>
     ${t.itinerary ? itineraryFromDetail(t.itinerary.map((p, i) => Object.assign({day: i + 1}, p))) : ""}
     ${t.fleet && t.fleet.choice !== false ? `<div class="sect">Freie Kabinen je Kategorie (Stand ${d(t.fleet.date)})</div>
       <p class="kmeta">${Object.entries(t.fleet.cats).sort().map(([k, v]) => `<b>${k}</b> ${v}${v >= 100 ? "+" : ""}`).join(" · ")}
