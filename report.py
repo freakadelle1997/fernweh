@@ -1211,7 +1211,9 @@ td.code { font-weight: 600; }
 tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
-  cursor: pointer; text-align: left; font: inherit; color: inherit; transition: border-color .12s, transform .12s; }
+  cursor: pointer; text-align: left; font: inherit; color: inherit; transition: border-color .12s, transform .12s;
+  display: flex; flex-direction: column; justify-content: flex-start; }
+.card .cfoot { margin-top: auto; }
 .card:hover { border-color: var(--s1); transform: translateY(-2px); }
 .card h2 { font-size: 18px; margin: 0 0 3px; }
 .card .meta { font-size: 13px; margin-bottom: 14px; }
@@ -1220,7 +1222,7 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .card .cstat .k { color: var(--text-2); font-size: 13px; }
 .card .cstat .v { font-weight: 650; font-variant-numeric: tabular-nums; }
 .card .focusbadge { display: inline-block; background: color-mix(in srgb, var(--s1) 12%, transparent);
-  color: var(--s1); border-radius: 6px; padding: 2px 8px; font-size: 12.5px; font-weight: 600; margin-bottom: 12px; }
+  color: var(--s1); border-radius: 6px; padding: 2px 8px; font-size: 12.5px; font-weight: 600; margin-bottom: 12px; align-self: flex-start; }
 .card .arrow { color: var(--muted); font-size: 13px; margin-top: 12px; }
 .card .cbz { padding: 8px 0 0; border-top: 1px solid var(--border); }
 .card .cbz .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; }
@@ -1845,6 +1847,7 @@ function tripCard(t, ti) {
       onclick="event.stopPropagation(); removeTrip('${t.journey}')">✕</span>
     <h2>${t.title}</h2>
     <div class="meta">${shipName(t.ship, "big")} · ${d(t.start)} bis ${d(t.end)} ab ${t.from}</div>
+    <div class="cfoot">
     ${fb}
     ${t.focus ? `<div class="cstat"><span class="k">${t.focus.group} (${t.focus.code}) ALL IN</span>
       <span class="v">${eur(now.focus_allin)} ${dPrice}</span></div>` : ""}
@@ -1855,9 +1858,9 @@ function tripCard(t, ti) {
          <div class="cstat"><span class="k">Belegt</span><span class="v">${occ.toFixed(0)} %</span></div>`}
     ${t.bz ? `<div class="cbz"><div class="h"><span class="k">Buchungszeitpunkt${t.bz.typ ? " · " + t.bz.typ : ""}</span>
       <span class="bzv v${t.bz.v}">${BZ_LABEL[t.bz.v]}</span></div>${bzStrip(t.bz)}
-      ${t.focus && now.focus_allin && bzEur(t.bz, now.focus_allin) ? `<div class="bze">${bzEur(t.bz, now.focus_allin)} für deine Kabine im nächsten Monat</div>` : ""}</div>` : ""}
+      <div class="bze">${t.focus && now.focus_allin && bzEur(t.bz, now.focus_allin) ? `${bzEur(t.bz, now.focus_allin)} für deine Kabine im nächsten Monat` : "&nbsp;"}</div></div>` : ""}
     ${t.error ? '<div class="arrow" style="color:var(--up)">⚠ letzter Abruf fehlgeschlagen</div>' : ""}
-    <div class="arrow">Details ansehen →</div>
+    <div class="arrow">Details ansehen →</div></div>
   </button>`;
 }
 
