@@ -504,7 +504,7 @@ def _booking(daten):
 
 
 def _bz_advice(B, j, focus=None, cats=None):
-    """Einschätzung für eine Reise: v = 2 bald buchen, 1 steigt leicht, 0 kein Zeitdruck; r = Gründe;
+    """Einschätzung für eine Reise: v = 2 jetzt buchen, 1 zeitnah buchen, 0 kein Zeitdruck; r = Gründe;
     e = erwartete Preisänderung im nächsten Monat in %. focus = (Kategorie, freie Kabinen) der
     Wunschkategorie; cats = freie Kabinen je Kategorie (4-Monats-Reisen)."""
     if not B or j not in B["_start"]:
@@ -571,7 +571,7 @@ def _bz_advice(B, j, focus=None, cats=None):
         if few and sc.get("1–5"):
             r.append(f"Nur noch 1–5 frei in {', '.join(few)} – solche Kategorien verschwinden zu {sc['1–5']:.0f} % "
                      f"innerhalb eines Monats.")
-    # Lage auf dem Farbstrahl (0 = kein Zeitdruck … 100 = bald buchen), je Etikett ein Drittel
+    # Lage auf dem Farbstrahl (0 = kein Zeitdruck … 100 = jetzt buchen), je Etikett ein Drittel
     cl = lambda x: max(0.0, min(1.0, x))
     if v == 0:
         s = 33 * cl(e / 0.3)
@@ -1493,7 +1493,7 @@ const GROUPS = DATA.groups;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const eur = v => v == null ? "–" : v.toLocaleString("de-DE", {maximumFractionDigits: 0}) + " €";
 const d = s => s.split("-").reverse().join(".");
-const BZ_LABEL = ["Kein Zeitdruck", "Steigt leicht", "Bald buchen"];
+const BZ_LABEL = ["Kein Zeitdruck", "Zeitnah buchen", "Jetzt buchen"];
 const bzStrip = bz => `<div class="bzs" title="${BZ_LABEL[bz.v]}"><i style="--p:${bz.s ?? [15, 50, 85][bz.v]}"></i></div>`;
 const bzEur = (bz, price) => price && bz.e ? `erwartet ${bz.e > 0 ? "+" : "−"}${eur(Math.abs(Math.round(price * bz.e / 100)))}` : "";
 const sign = (v, unit = "", invert = false) => {
@@ -2408,8 +2408,8 @@ function renderBooking() {
       <div class="bzs" style="margin:12px 0 10px"></div>
       <div class="bzl">
         <div><span class="bzv v0">Kein Zeitdruck</span><p>Der Preis bleibt voraussichtlich etwa gleich. Warten kostet wenig, bringt aber meist auch nichts.</p></div>
-        <div><span class="bzv v1">Steigt leicht</span><p>Der Preis steigt voraussichtlich, aber langsam (0,3–1 % pro Monat).</p></div>
-        <div><span class="bzv v2">Bald buchen</span><p>Der Preis steigt wahrscheinlich bald: Die Kabinenart ist gerade teurer geworden, die Reise steckt in einer teuren Phase (über 1 % pro Monat) oder die Wunschkategorie ist fast ausgebucht.</p></div>
+        <div><span class="bzv v1">Zeitnah buchen</span><p>Der Preis steigt voraussichtlich, aber langsam (0,3–1 % pro Monat).</p></div>
+        <div><span class="bzv v2">Jetzt buchen</span><p>Der Preis steigt wahrscheinlich bald: Die Kabinenart ist gerade teurer geworden, die Reise steckt in einer teuren Phase (über 1 % pro Monat) oder die Wunschkategorie ist fast ausgebucht.</p></div>
       </div>
       <p class="note" style="margin:10px 0 0">Der Punkt zeigt, wo eine Reise steht – je weiter rechts, desto eiliger. Bei „Meine Reisen“ zählt deine gewählte Kabinenkategorie. Die Gründe stehen in der Reise unter „Buchungszeitpunkt“.</p></div>
     <details style="margin-top:14px"><summary style="cursor:pointer;color:var(--text-2)">Alle Zahlen und wie sie entstehen</summary>
