@@ -1631,11 +1631,22 @@ const CABIN_TYPES = {I: "Innen", M: "Meerblick", B: "Balkon", V: "Veranda", K: "
 const TNAME = {CLASSICAI: "CLASSIC ALL IN", PREMIUMAI: "PREMIUM ALL IN", COMFORTAI: "COMFORT ALL IN",
   PAUSCHALAI: "PAUSCHAL ALL IN", SEEREISEAI: "SEEREISE ALL IN"};
 const FLY_FROM = ["CGN", "FRA"];          // bevorzugte Abflughäfen in dieser Reihenfolge
-const FF_CRUISE = 0.10, FF_FLIGHT = 0.07;  // Family & Friends: −10 % Reisepreis, −7 % Flug
+// Family & Friends, an der Buchung 17834407 (06.11.2026) centgenau nachgerechnet: −10 % auf den
+// Reisepreis ohne Getränkepaket (ALL-IN-Aufschlag kostet voll), −8 % auf den Flug
+const FF_CRUISE = 0.10, FF_FLIGHT = 0.08;
 function pickFlight(c) {
   const fl = c.flights || {};
   for (const ap of FLY_FROM) if (fl[ap]) return {ap, part: fl[ap]};
   return null;
+}
+// ALL-IN-Aufschlag einer Zelle: Abstand zum selben Tarif ohne ALL IN, bei COMFORT ALL IN der von PREMIUM
+function allInPart(cells, tarifs, c) {
+  if (!c.tariff.endsWith(" ALL IN")) return 0;
+  const at = x => (cells[tarifs.indexOf(x)] || {}).cabin;
+  const base = at(c.tariff.replace(" ALL IN", ""));
+  if (base) return c.cabin - base;
+  const pa = at("PREMIUM ALL IN"), p = at("PREMIUM");
+  return pa && p ? pa - p : 0;
 }
 // Detail-Tabelle einer hinterlegten Reise: Flug ab CGN (sonst FRA), F&F-Preise, Wunschkategorie
 function tariffMatrixDetail(t) {
@@ -1672,7 +1683,8 @@ function tariffMatrix(tariffs, withFlight = true, opt = {}) {
       let ff = "";
       if (opt.ff && c.cabin) {
         const f = pickFlight(c);
-        const cr = c.cabin * (1 - FF_CRUISE);
+        const ai = allInPart(cells, tarifs, c);
+        const cr = (c.cabin - ai) * (1 - FF_CRUISE) + ai;
         ff = `<span class="f ff">F&amp;F ${eur(cr)}${f ? ` · mit Flug ${eur(cr + f.part * (1 - FF_FLIGHT))}` : ""}</span>`;
       }
       const tag = isFoc && !c.own && c.tariff === "CLASSIC" ? ' <span class="mut" title="Garantiekabine, keine Kabinenwahl">G</span>' : "";
@@ -2146,7 +2158,7 @@ function renderDetail(ti) {
         ${t.port_coords && Object.keys(t.port_coords).length ? `<figure><div class="leafmap" id="lm${ti}"></div><figcaption class="routecap">Häfen laut Reiseverlauf · Karte © OpenStreetMap</figcaption></figure>` : ""}
       </div>
       ${itinerary(t)}
-      ${t.tariffs && t.tariffs.length ? `<div class="sect">Preise je Kabinenart und Tarif</div>${tariffMatrixDetail(t)}<p class="note" style="margin-top:-8px">Kabinenpreis für 2 Erwachsene (günstigste Kabine der Kabinenart${t.focus_prices ? `, in der Zeile ${t.focus_prices.code} der Preis deiner Wunschkategorie ${t.focus_prices.code}; G = CLASSIC-Garantiekabine ohne Kabinenwahl` : ""}). Darunter: inkl. Hin- und Rückflug ab ${FLY_FROM[0]}, sonst ab ${FLY_FROM[1]}; F&amp;F = Family &amp; Friends (−10 % auf den Reisepreis, −7 % auf den Flug). Grün = günstigster Tarif je Kabinenart.</p>` : ""}
+      ${t.tariffs && t.tariffs.length ? `<div class="sect">Preise je Kabinenart und Tarif</div>${tariffMatrixDetail(t)}<p class="note" style="margin-top:-8px">Kabinenpreis für 2 Erwachsene (günstigste Kabine der Kabinenart${t.focus_prices ? `, in der Zeile ${t.focus_prices.code} der Preis deiner Wunschkategorie ${t.focus_prices.code}; G = CLASSIC-Garantiekabine ohne Kabinenwahl` : ""}). Darunter: inkl. Hin- und Rückflug ab ${FLY_FROM[0]}, sonst ab ${FLY_FROM[1]}; F&amp;F = Family &amp; Friends (−10 % auf den Reisepreis, das ALL-IN-Getränkepaket kostet voll; −8 % auf den Flug; Jugendliche 16–24 zahlen 75 % des Reisepreises, hier nicht eingerechnet). Grün = günstigster Tarif je Kabinenart.</p>` : ""}
       <div class="sect">Verlauf · Preis und freie Kabinen</div><div id="ph${ti}"></div>
       ${changesBlock(t)}
       ${focusBlock(t, ti)}
