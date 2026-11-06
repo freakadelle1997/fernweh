@@ -193,6 +193,59 @@ def _sales(con, runs, focus=None):
             "capped_cats": sorted(caps[-1])}
 
 
+def _cabin_log(con, runs, start=None):
+    """Kabinen-Chronik einer hinterlegten Reise: je Kabinennummer die Zeiträume, in denen sie
+    frei war, und wie sie jeweils aus der Liste verschwand. Zeitpunkte sind Indizes in x, ein
+    Zeitraum ohne Ende ist noch frei. Art des Verschwindens:
+    w = weg (Kategorie unter 100, vermutlich gebucht; kommt sie wieder, war sie nur kurz weg),
+    f = aus dem sichtbaren 100er-Fenster gefallen (Kategorie gedeckelt, evtl. noch frei),
+    z = in der Nacht auf Tag ASSIGN_DAYS vor Abfahrt an CLASSIC/LIGHT-Bucher zugeteilt,
+    r = mit ihrer Freigabe gemeinsam zurückgezogen (wie in _sales)."""
+    if not runs:
+        return None
+    sets, caps = [], []
+    for r in runs:
+        cats = _cats(con, r["id"])
+        caps.append({k for k, c in cats.items() if c["free"] >= CAP})
+        sets.append(_cabin_set(con, r["id"]))
+    ts = [datetime.fromisoformat(r["fetched_at"]) for r in runs]
+    assign_at = datetime.combine(date.fromisoformat(start) - timedelta(days=ASSIGN_DAYS),
+                                 datetime.min.time()) + timedelta(hours=4) if start else None
+    per = {x: [[0]] for x in sets[0]}  # Kabine -> [[von, bis, art], ..., [von]]
+    appeared = {}                       # neu freigegebene Kabine -> Abruf-Index des Auftauchens
+    for i in range(1, len(runs)):
+        a, b = sets[i - 1], sets[i]
+        capped = caps[i - 1] | caps[i]
+        gone = a - b
+        assign = assign_at is not None and ts[i - 1] < assign_at <= ts[i]
+        wd = set()
+        for j in {appeared[x] for x in gone if x in appeared}:
+            grp = {x for x, k in appeared.items() if k == j}
+            if len(grp) >= WITHDRAW_MIN and grp <= gone:
+                wd |= grp
+        for x in gone:
+            appeared.pop(x, None)
+            per[x][-1] += [i, "z" if assign else "r" if x in wd else "f" if x[0] in capped else "w"]
+        for x in b - a:
+            if x[0] not in capped and (x not in per or per[x][-1][2] != "w"):
+                appeared[x] = i
+            per.setdefault(x, []).append([i])
+    return {"x": [r["fetched_at"][:16] for r in runs],
+            "k": [[n, code, p] for (code, n), p in sorted(per.items(), key=lambda kv: kv[0][1])]}
+
+
+def _write_cabin_logs(con, data, out_dir):
+    """Kabinen-Chronik je hinterlegter Reise als kabinen/<id>.json neben die Seite (lädt bei Bedarf)."""
+    kdir = out_dir / "kabinen"
+    kdir.mkdir(exist_ok=True)
+    for t in data:
+        if t.get("cabin_choice") is False:
+            continue
+        log = _cabin_log(con, _all_runs(con, t["journey"]), t.get("start"))
+        if log:
+            (kdir / f"{t['journey']}.json").write_text(json.dumps(log, separators=(",", ":")))
+
+
 TNAME_PY = {"CLASSICAI": "CLASSIC ALL IN", "PREMIUMAI": "PREMIUM ALL IN", "COMFORTAI": "COMFORT ALL IN"}
 CAT_PRICE_COLS = {"price_light": "LIGHT", "price_classic": "CLASSIC", "price_classic_ai": "CLASSIC ALL IN",
                   "price_premium": "PREMIUM", "price_premium_ai": "PREMIUM ALL IN", "price_comfort_ai": "COMFORT ALL IN"}
@@ -1107,6 +1160,7 @@ def build(con=None):
     build_id = datetime.now().isoformat(timespec="seconds")
     (OUT.parent / "version.json").write_text(json.dumps({"build": build_id}))
     _write_price_histories(con, data, daten, OUT.parent, [t["journey"] for t in data])
+    _write_cabin_logs(con, data, OUT.parent)
     _write_logs(daten, OUT.parent)
     html = TEMPLATE.replace("__DATA__", json.dumps({"build": build_id, "ship_imgs": ship_imgs, "dashboard": _dashboard(daten), "pricing": _pricing(daten),
                                                     "booking": {k: v for k, v in (booking or {}).items() if not k.startswith("_")} or None,
@@ -1396,6 +1450,10 @@ tr.hl td { background: color-mix(in srgb, var(--s1) 10%, transparent); }
 .cab { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12.5px; background: var(--bg); }
 .cab b { font-size: 13.5px; }
 .cab .x { color: var(--text-2); }
+.kl { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 0 0 10px; }
+.kl td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: top; white-space: normal; }
+.kl td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.kl .x { color: var(--text-2); font-size: 12px; margin-top: 2px; }
 .cab a { color: var(--s1); }
 .freebtn { background: none; border: none; color: var(--s1); font: inherit; cursor: pointer;
   padding: 0; font-variant-numeric: tabular-nums; }
@@ -1768,6 +1826,71 @@ function salesBlock(t, ti) {
     <p class="note" style="margin-top:-10px">Gezählt aus den Kabinennummern je Abruf, nur in Kategorien unter 100 freien Kabinen${s.capped_cats.length ? ` (gedeckelt und daher nicht gezählt: ${s.capped_cats.join(", ")})` : ""}. Links kumuliert: rot = verschwundene, grün = wieder frei gewordene Kabinen seit Beobachtungsbeginn; rechts netto verkauft. „Kurz reserviert“ = Kabine war weg und kam später zurück (z. B. abgebrochene Buchung).${s.withdrawn ? " „Zurückgezogen“ = AIDA hat mehrere Kabinen gemeinsam neu freigegeben und später gemeinsam wieder herausgenommen – zählt nicht als Verkauf." : ""}</p>`;
 }
 
+// ---------- Kabinen einzeln (kabinen/<id>.json): wann welche Kabinennummer nicht mehr frei war ----------
+const KL_HOW = {w: "vermutlich gebucht", f: "aus der 100er-Liste gefallen, evtl. noch frei",
+  z: "an CLASSIC/LIGHT-Bucher zugeteilt", r: "von AIDA zurückgenommen"};
+const KL_GAP = {w: "kurz weg", f: "nicht in der 100er-Liste", z: "zugeteilt", r: "zurückgenommen"};
+const KLF = {q: "", cat: "", st: "weg", show: 50};
+function cabinLogBlock(t, ti) {
+  if (t.cabin_choice === false) return "";
+  return `<div class="sect">Kabinen einzeln · wann nicht mehr frei</div><div id="kl${ti}"><p class="mut">Lädt …</p></div>`;
+}
+async function cabinLog(el, t) {
+  if (!el) return;
+  let h;
+  try {
+    const r = await fetch("kabinen/" + t.journey + ".json", {cache: "no-cache"});
+    if (!r.ok) { el.innerHTML = `<p class="mut">Noch keine Kabinenliste – entsteht beim nächsten Abruf.</p>`; return; }
+    h = await r.json();
+  } catch { return; }
+  const X = h.x, n = v => v.toLocaleString("de-DE");
+  const at = i => d(X[i].slice(0, 10)).slice(0, 6) + " " + X[i].slice(11, 16);
+  const before = (i, ref) => X[i].slice(0, 10) === X[ref].slice(0, 10) ? X[i].slice(11, 16) : at(i);
+  const rows = h.k.map(([n, c, p]) => { const e = p[p.length - 1];
+    return {n, c, p, free: e.length === 1, end: e[1], how: e[2]}; });
+  const fc = t.focus ? t.focus.code : null;
+  const gone = rows.filter(r => !r.free), cnt = k => gone.filter(r => r.how === k).length;
+  const cats = [...new Set(rows.map(r => r.c))].sort();
+  if (!cats.includes(KLF.cat)) KLF.cat = "";
+  KLF.show = 50;
+  el.innerHTML = `<p class="kmeta">${n(rows.length)} Kabinennummern waren seit ${d(X[0].slice(0, 10))} mindestens einmal frei, ${n(rows.length - gone.length)} sind es jetzt noch.
+      Nicht mehr frei: ${n(cnt("w"))} vermutlich gebucht${cnt("z") ? `, ${n(cnt("z"))} zugeteilt` : ""}${cnt("r") ? `, ${n(cnt("r"))} zurückgenommen` : ""}${cnt("f") ? `, ${n(cnt("f"))} aus der 100er-Liste gefallen` : ""}.</p>
+    <div class="filters">
+      <label>Kabinennummer<input type="search" inputmode="numeric" data-kl="q" value="${KLF.q}" placeholder="z. B. 12053"></label>
+      <label>Kategorie<select data-kl="cat"><option value="">alle</option>${cats.map(c => `<option${c === KLF.cat ? " selected" : ""}>${c}</option>`).join("")}</select></label>
+      <label>Zeigen<select data-kl="st">${[["weg", "nicht mehr frei"], ["frei", "noch frei"], ["zurueck", "zwischendurch weg"], ["alle", "alle"]]
+        .map(([v, l]) => `<option value="${v}"${v === KLF.st ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    </div><div class="kltab"></div>
+    <p class="note">Abgeleitet aus den Kabinennummern jedes Abrufs (stündlich 8–24 Uhr). „Nicht mehr frei seit“ ist der erste Abruf ohne die Kabine, „zuletzt frei“ der Abruf davor – dazwischen ist sie verschwunden.
+      „Vermutlich gebucht“ = in einer Kategorie unter 100 freien Kabinen verschwunden und bis jetzt nicht zurück; kommt sie wieder, war sie nur kurz weg (z. B. abgebrochene Buchung).
+      Bei 100 oder mehr freien zeigt AIDA nur 100 – fällt eine Kabine dort heraus, kann sie noch frei sein.
+      „Zugeteilt“ = in der Nacht auf den 30. Tag vor Abfahrt vergibt AIDA Kabinen an Buchungen ohne Kabinenwahl.
+      „Zurückgenommen“ = AIDA hat mehrere Kabinen gemeinsam freigegeben und gemeinsam wieder herausgenommen.</p>`;
+  const draw = () => {
+    const q = KLF.q.trim();
+    let list = rows.filter(r => (!q || r.n.includes(q)) && (!KLF.cat || r.c === KLF.cat) &&
+      (KLF.st === "alle" || (KLF.st === "weg" ? !r.free : KLF.st === "frei" ? r.free : r.p.length > 1)));
+    list.sort((a, b) => (a.free - b.free) || (b.end || 0) - (a.end || 0) || a.n.localeCompare(b.n));
+    const box = el.querySelector(".kltab");
+    if (!list.length) { box.innerHTML = `<p class="mut">Keine Kabine passt zur Auswahl.</p>`; return; }
+    box.innerHTML = `<table class="kl"><tr><td><b>Kabine</b></td><td><b>Nicht mehr frei seit</b></td><td><b>Was war</b></td></tr>
+      ${list.slice(0, KLF.show).map(r => {
+        const cur = r.p[r.p.length - 1];
+        const gaps = r.p.slice(0, -1).map((s, i) => `${KL_GAP[s[2]]} ${at(s[1])} bis ${at(r.p[i + 1][0])}`);
+        const now = r.free ? `frei seit ${cur[0] ? at(cur[0]) : "Beobachtungsbeginn"}` : KL_HOW[r.how];
+        return `<tr class="${r.c === fc ? "hl" : ""}">
+          <td class="t"><b>${r.n}</b><div class="x">${r.c} · Deck ${r.n.slice(0, -3)}</div></td>
+          <td class="t">${r.free ? `<span class="mut">noch frei</span>` : `${at(r.end)}<div class="x">zuletzt frei ${before(r.end - 1, r.end)}</div>`}</td>
+          <td>${now}${gaps.length ? `<div class="x">${gaps.slice(-3).join("<br>")}${gaps.length > 3 ? `<br>und ${gaps.length - 3}× früher` : ""}</div>` : ""}</td></tr>`;
+      }).join("")}</table>` + (list.length > KLF.show ? `<button class="mark" data-klmore>Weitere anzeigen (${n(list.length - KLF.show)})</button>` : "");
+    const more = box.querySelector("[data-klmore]");
+    if (more) more.onclick = () => { KLF.show += 100; draw(); };
+  };
+  el.querySelectorAll("[data-kl]").forEach(x => x.addEventListener(x.type === "search" ? "input" : "change", () => {
+    KLF[x.dataset.kl] = x.value; KLF.show = 50; draw(); }));
+  draw();
+}
+
 function focusBlock(t, ti) {
   if (!t.focus) return "";
   const s = t.series, n = s.length, last = s[n - 1], prev = n > 1 ? s[n - 2] : null, first = s.find(x => x.focus_allin != null) || s[0];
@@ -2028,6 +2151,7 @@ function renderDetail(ti) {
       ${changesBlock(t)}
       ${focusBlock(t, ti)}
       ${salesBlock(t, ti)}
+      ${cabinLogBlock(t, ti)}
       <div class="sect">Ganzes Schiff</div>
       ${t.cabin_choice === false ? `<p class="mut" style="margin:0 0 22px">Für diese Reise gibt AIDA keine Kabinenliste heraus (Kabine wird bei der Buchung zugeteilt) – freie Kabinen und Belegung sind deshalb nicht bekannt, nur die Preise.</p>` : `
       <div class="tiles">
@@ -2062,6 +2186,7 @@ function renderDetail(ti) {
   window.scrollTo(0, 0);
   if (t.port_coords) drawRoute($("lm" + ti), t.itinerary, t.port_coords);
   priceHistory($("ph" + ti), t.journey, t.focus ? t.focus.code : null);
+  cabinLog($("kl" + ti), t);
 
   const labels = t.series.map(s => d(s.day).slice(0, 6) + " " + (s.ts ? s.ts.slice(11, 16) : ""));
   const base = (yfmt) => ({
