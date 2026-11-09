@@ -932,9 +932,31 @@ def trip_data(con, journey, focus=None):
             if focus and focus in cur else None),
         "itinerary": json.loads(latest["itinerary"]) if "itinerary" in latest.keys() and latest["itinerary"] else None,
         "region": latest["region"] if "region" in latest.keys() else None,
-        "cabin_choice": None if "cabin_choice" not in latest.keys() or latest["cabin_choice"] is None
-        else bool(latest["cabin_choice"]),
+        "cabin_choice": _cabin_choice(runs),
+        "choice_closed": _choice_closed(runs),
     }
+
+
+def _cabin_choice(runs):
+    """False nur, wenn AIDA für diese Reise NIE eine Kabinenliste geliefert hat (Kabine wird
+    immer zugeteilt). Liefert AIDA kurz vor Abfahrt keine Liste mehr (ausgebucht), bleibt der
+    Kabinenverlauf sichtbar – das markiert _choice_closed."""
+    latest = runs[-1]
+    if "cabin_choice" not in latest.keys() or latest["cabin_choice"] is None:
+        return None
+    if latest["cabin_choice"]:
+        return True
+    return True if any(r["cabin_choice"] for r in runs) else False
+
+
+def _choice_closed(runs):
+    """Zeitpunkt, ab dem AIDA keine Kabinenliste mehr liefert, obwohl es früher eine gab."""
+    if "cabin_choice" not in runs[-1].keys() or not any(r["cabin_choice"] for r in runs):
+        return None
+    if not any(r["cabin_choice"] == 0 for r in runs[-12:]):
+        return None
+    last_open = max(i for i, r in enumerate(runs) if r["cabin_choice"] and (r["free_total"] or 0) > 3)
+    return next((r["fetched_at"] for r in runs[last_open + 1:] if r["cabin_choice"] == 0), None)
 
 
 def _fetch_maps(data, dest_dir):
@@ -2152,6 +2174,7 @@ function renderDetail(ti) {
         ${(t.offer.amenities || []).map(a => `<span class="mut">${a}</span>`).join("")}</div>
         <div class="chips">${offerChips(t)}</div>` : ""}
       ${bzBox(t.bz, t.offer && t.offer.from_pp)}
+      ${t.choice_closed ? `<div class="warnbox"><b>Kabinenwahl fast ausgebucht:</b> Seit ${d(t.choice_closed.slice(0, 10))} liefert AIDA keine Kabinenliste mehr, nur noch zeitweise einzelne Restkabinen. Buchbar ist die Reise nur noch mit zugeteilter Kabine (siehe Preise). Der Kabinenverlauf bis dahin bleibt unten sichtbar.</div>` : ""}
       ${t.cabin_choice === false ? `<div class="warnbox"><b>Kabine wird zugeteilt:</b> Für diese Reise lässt sich keine bestimmte Kabinennummer wählen – AIDA teilt die Kabine bei der Buchung zu.</div>` : ""}
       <div class="maps">
         ${t.map_file ? `<figure><img class="routemap" src="${t.map_file}" alt="Route ${t.title}"><figcaption class="routecap">Reiseroute laut AIDA</figcaption></figure>` : ""}
